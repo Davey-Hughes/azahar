@@ -70,3 +70,24 @@ endif()
 if (CITRA_USE_PRECOMPILED_HEADERS)
     target_precompile_headers(audio_core PRIVATE precompiled_headers.h)
 endif()
+
+if (ENABLE_AUDIOBENCH)
+    # audiobench needs -fno-access-control, which is GCC/Clang only. Without it the target does
+    # not compile at all: RunSearchActivity() (tools/audiobench.cpp) reads WsolaStretcher's
+    # private search state directly, so MSVC would fail with "member is private" errors. The
+    # whole target is therefore gated on the compiler rather than just the flag, so turning the
+    # option on does not break an MSVC build.
+    if (NOT MSVC AND (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
+        add_executable(audiobench tools/audiobench.cpp)
+        target_link_libraries(audiobench PRIVATE audio_core citra_common Threads::Threads)
+        # Reading that private state is how the search is measured without adding any test-only
+        # surface to the shipped class. This relaxes access control for this diagnostic target
+        # only - WsolaStretcher itself, and every other target that links it, is unaffected.
+        target_compile_options(audiobench PRIVATE -fno-access-control)
+        create_target_directory_groups(audiobench)
+    else()
+        message(WARNING
+            "ENABLE_AUDIOBENCH is ON but the audiobench target needs -fno-access-control, which "
+            "only GCC and Clang provide. Skipping it for compiler '${CMAKE_CXX_COMPILER_ID}'.")
+    endif()
+endif()
