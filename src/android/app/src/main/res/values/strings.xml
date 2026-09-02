@@ -359,7 +359,11 @@
     <!-- Audio settings strings -->
     <string name="audio_volume">Volume</string>
     <string name="audio_stretch">Audio Stretching</string>
-    <string name="audio_stretch_description">Stretches audio to reduce stuttering. When enabled, increases audio latency and slightly reduces performance.</string>
+    <string name="audio_stretch_description">Stretches audio to cover brief slowdowns when your device cannot hold full speed, so they do not become stutter. Increases audio latency and slightly reduces performance. Does not apply while fast-forwarding or in slow motion.</string>
+    <string name="speedup_audio">Preserve Pitch When Changing Speed</string>
+    <string name="speedup_audio_description">Time-stretches audio during fast-forward and slow motion so the pitch stays correct, instead of dropping samples. Only active when the speed limit is not 100%.</string>
+    <string name="speedup_lowpass">Fast-Forward Low-Pass</string>
+    <string name="speedup_lowpass_description">Softens harsh fast-forward audio. Set it as high as still sounds good; the maximum turns the filter off.</string>
     <string name="realtime_audio">Enable Realtime Audio</string>
     <string name="realtime_audio_description">Scales audio playback speed to account for drops in emulation framerate. This means that audio will play at full speed even while the game framerate is low. May cause audio desync issues.</string>
     <string name="simulate_headphones_plugged">Simulate Headphones Plugged In</string>

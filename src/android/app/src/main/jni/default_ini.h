@@ -424,6 +424,17 @@ static const char* android_config_default_file_content = (BOOST_HANA_STRING(R"(
 # 0 (default): No, 1: Yes
 )") DECLARE_KEY(enable_realtime_audio) BOOST_HANA_STRING(R"(
 
+# Whether or not to preserve pitch while the emulation speed limit is not 100%
+# Time-stretches fast-forward and slow-motion audio instead of dropping samples.
+# 0: No, 1 (default): Yes
+)") DECLARE_KEY(enable_speedup_audio) BOOST_HANA_STRING(R"(
+
+# Reference cutoff in Hz for the fast-forward low-pass, divided by the emulation speed to get the
+# cutoff actually applied. Lower values dull fast-forward audio more. Only used when
+# enable_speedup_audio is on.
+# 1000 - 24000 in steps of 500, 22000 (default). 24000 disables the filter.
+)") DECLARE_KEY(speedup_lowpass) BOOST_HANA_STRING(R"(
+
 # Simulates whether headphones are plugged in to the emulated 3DS system
 # 0 (default): No, 1: Yes
 )") DECLARE_KEY(simulate_headphones_plugged) BOOST_HANA_STRING(R"(
