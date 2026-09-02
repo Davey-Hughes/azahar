@@ -152,6 +152,8 @@ option(ENABLE_DEVELOPER_OPTIONS "Enable functionality targeted at emulator devel
 
 option(ENABLE_BUILTIN_KEYBLOB "Enable the inclusion of the default crypto keys blob" ON)
 
+option(ENABLE_AUDIOBENCH "Build the audiobench off-speed audio measurement tool" OFF)
+
 # Compile options
 CMAKE_DEPENDENT_OPTION(COMPILE_WITH_DWARF "Add DWARF debugging information" ${IS_DEBUG_BUILD} "MINGW" OFF)
 option(ENABLE_LTO "Enable link time optimization" ${DEFAULT_ENABLE_LTO})
