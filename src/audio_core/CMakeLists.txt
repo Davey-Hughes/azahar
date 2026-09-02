@@ -31,10 +31,14 @@ add_library(audio_core STATIC EXCLUDE_FROM_ALL
     sink.h
     sink_details.cpp
     sink_details.h
+    speedup_lowpass.h
+    speedup_params.h
     static_input.cpp
     static_input.h
     time_stretch.cpp
     time_stretch.h
+    wsola_stretcher.cpp
+    wsola_stretcher.h
 
     $<$<BOOL:${ENABLE_SDL2}>:sdl2_sink.cpp sdl2_sink.h>
     $<$<BOOL:${ENABLE_CUBEB}>:cubeb_sink.cpp cubeb_sink.h cubeb_input.cpp cubeb_input.h>

@@ -8,7 +8,10 @@
 #include <span>
 #include <boost/serialization/access.hpp>
 #include "audio_core/audio_types.h"
+#include "audio_core/speedup_lowpass.h"
+#include "audio_core/speedup_params.h"
 #include "audio_core/time_stretch.h"
+#include "audio_core/wsola_stretcher.h"
 #include "common/common_types.h"
 #include "common/ring_buffer.h"
 #include "core/memory.h"
@@ -102,6 +105,8 @@ public:
     Sink& GetSink();
     /// Enable/Disable audio stretching.
     void EnableStretching(bool enable);
+    /// Enable/Disable the off-speed audio path, and set its low-pass reference in Hz.
+    void SetSpeedupAudio(bool enable, u16 lowpass_reference);
 
 protected:
     void OutputFrame(StereoFrame16 frame);
@@ -110,15 +115,37 @@ protected:
 private:
     void FlushResidualStretcherAudio();
     void OutputCallback(s16* buffer, std::size_t num_frames);
+    std::size_t FillFromWsola(s16* buffer, std::size_t num_frames);
+    void DrainFifoIntoWsola();
 
     Core::System& system;
 
     std::atomic<bool> enable_time_stretching = false;
     std::atomic<bool> performing_time_stretching = false;
     std::atomic<bool> flushing_time_stretcher = false;
+    // Sized for one callback interval's arrival: FillFromWsola() (audio_core/dsp_interface.cpp)
+    // drains it fully every callback, so 0x2000 frames covers callback_frames * speed with room
+    // to spare at any speed the frame limiter allows (1000%, common/settings.h:553). Past that
+    // bound the FIFO drops and the stretcher Resync()s across the gap rather than splicing; see
+    // audio_core/tools/audiobench.cpp for how often that happens.
     Common::RingBuffer<s16, 0x2000, 2> fifo;
     std::array<s16, 2> last_frame{};
     TimeStretcher time_stretcher;
+
+    static constexpr std::size_t kPopChunkFrames = 2048;
+    std::atomic<bool> enable_speedup_audio = false;
+    std::atomic<u16> speedup_lowpass_reference = kSpeedupLowPassOff;
+    WsolaStretcher wsola;
+    SpeedupLowPass low_pass;
+    bool wsola_engaged = false;
+    // Owned by the audio thread only; tracks whether the low-pass could engage on the previous
+    // callback, so a false-to-true transition can be detected and the filter re-primed. Never
+    // touched from SetSpeedupAudio(), which runs on a different thread.
+    bool lowpass_was_active = false;
+    double arrival_avg = 0.0;
+    s64 last_written = 0;
+    double sink_sample_rate = native_sample_rate;
+    std::array<s16, kPopChunkFrames * 2> pop_scratch{};
     std::unique_ptr<Sink> sink;
 
     template <class Archive>
