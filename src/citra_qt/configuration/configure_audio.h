@@ -36,10 +36,12 @@ private:
     void SetInputDeviceFromDeviceID();
     void SetVolumeIndicatorText(int percentage);
     void SetHleFeaturesEnabled();
+    void SetSpeedupLowPassEnabled();
 
     void SetupPerGameUI();
 
     ConfigurationShared::CheckState audio_stretching;
+    ConfigurationShared::CheckState speedup_audio;
     ConfigurationShared::CheckState realtime_audio;
     ConfigurationShared::CheckState simulate_headphones_plugged;
     std::unique_ptr<Ui::ConfigureAudio> ui;

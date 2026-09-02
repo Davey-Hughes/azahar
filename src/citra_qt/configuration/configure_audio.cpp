@@ -51,6 +51,8 @@ ConfigureAudio::ConfigureAudio(bool is_powered_on, QWidget* parent)
             &ConfigureAudio::UpdateAudioInputDevices);
     connect(ui->emulation_combo_box, qOverload<int>(&QComboBox::currentIndexChanged), this,
             &ConfigureAudio::SetHleFeaturesEnabled);
+    connect(ui->toggle_speedup_audio, &QCheckBox::toggled, this,
+            &ConfigureAudio::SetSpeedupLowPassEnabled);
 }
 
 ConfigureAudio::~ConfigureAudio() {}
@@ -67,6 +69,9 @@ void ConfigureAudio::SetConfiguration() {
 
     ui->toggle_audio_stretching->setChecked(Settings::values.enable_audio_stretching.GetValue());
     ui->toggle_realtime_audio->setChecked(Settings::values.enable_realtime_audio.GetValue());
+    ui->toggle_speedup_audio->setChecked(Settings::values.enable_speedup_audio.GetValue());
+    ui->speedup_lowpass_spinbox->setValue(Settings::values.speedup_lowpass.GetValue());
+    SetSpeedupLowPassEnabled();
     ui->simulate_headphones_plugged->setChecked(
         Settings::values.simulate_headphones_plugged.GetValue());
     SetHleFeaturesEnabled();
@@ -166,11 +171,22 @@ void ConfigureAudio::SetHleFeaturesEnabled() {
     ui->toggle_realtime_audio->setEnabled(is_hle);
 }
 
+void ConfigureAudio::SetSpeedupLowPassEnabled() {
+    const bool enabled = ui->toggle_speedup_audio->isChecked();
+    ui->speedup_lowpass_label->setEnabled(enabled);
+    ui->speedup_lowpass_spinbox->setEnabled(enabled);
+}
+
 void ConfigureAudio::ApplyConfiguration() {
     ConfigurationShared::ApplyPerGameSetting(&Settings::values.enable_audio_stretching,
                                              ui->toggle_audio_stretching, audio_stretching);
     ConfigurationShared::ApplyPerGameSetting(&Settings::values.enable_realtime_audio,
                                              ui->toggle_realtime_audio, realtime_audio);
+    ConfigurationShared::ApplyPerGameSetting(&Settings::values.enable_speedup_audio,
+                                             ui->toggle_speedup_audio, speedup_audio);
+    if (Settings::IsConfiguringGlobal()) {
+        Settings::values.speedup_lowpass = static_cast<u16>(ui->speedup_lowpass_spinbox->value());
+    }
     ConfigurationShared::ApplyPerGameSetting(&Settings::values.audio_emulation,
                                              ui->emulation_combo_box);
     ConfigurationShared::ApplyPerGameSetting(
@@ -242,6 +258,8 @@ void ConfigureAudio::SetupPerGameUI() {
     ui->input_device_label->setVisible(false);
     ui->input_device_combo_box->setVisible(false);
     ui->input_layout->setVisible(false);
+    ui->speedup_lowpass_label->setVisible(false);
+    ui->speedup_lowpass_spinbox->setVisible(false);
 
     connect(ui->volume_combo_box, qOverload<int>(&QComboBox::activated), this, [this](int index) {
         ui->volume_slider->setEnabled(index == 1);
@@ -257,6 +275,8 @@ void ConfigureAudio::SetupPerGameUI() {
 
     ConfigurationShared::SetColoredTristate(ui->toggle_realtime_audio,
                                             Settings::values.enable_realtime_audio, realtime_audio);
+    ConfigurationShared::SetColoredTristate(ui->toggle_speedup_audio,
+                                            Settings::values.enable_speedup_audio, speedup_audio);
     ConfigurationShared::SetColoredTristate(ui->simulate_headphones_plugged,
                                             Settings::values.simulate_headphones_plugged,
                                             simulate_headphones_plugged);
