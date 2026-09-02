@@ -45,19 +45,16 @@ TEST_CASE_METHOD(MerryAudio::MerryAudioFixture, "AudioTest-BiquadFilter",
     }
 
     {
-        /*
-        const s16 b0 = 0.057200221035302035 * (1 << 14);
-        const s16 b1 = 0.11440044207060407 * (1 << 14);
-        const s16 b2 = 0.0238274928983472 * (1 << 14);
-        const s16 a1 = -1.2188761083637 * (1 << 14);
-        const s16 a2 = 0.44767699250490806 * (1 << 14);
-        */
-        srand((u32)time(nullptr));
-        const s16 b0 = rand();
-        const s16 b1 = rand();
-        const s16 b2 = rand();
-        const s16 a1 = rand();
-        const s16 a2 = rand();
+        // A stable second-order lowpass, in the DSP's Q14. Random coefficients put the poles
+        // outside the unit circle most of the time, and an unstable biquad saturates; saturation
+        // is nonlinear and inside the feedback path, so the comparison below stops meaning
+        // anything once it engages. a1 and a2 are stored pre-negated, as the reference loop and
+        // SourceFilters::Biquad (audio_core/hle/filter.cpp) both add rather than subtract them.
+        const s16 b0 = static_cast<s16>(0.057200221035302035 * (1 << 14));
+        const s16 b1 = static_cast<s16>(0.11440044207060407 * (1 << 14));
+        const s16 b2 = static_cast<s16>(0.0238274928983472 * (1 << 14));
+        const s16 a1 = static_cast<s16>(1.2188761083637 * (1 << 14));
+        const s16 a2 = static_cast<s16>(-0.44767699250490806 * (1 << 14));
 
         std::array<s32, 160> expected_output;
         {
