@@ -349,6 +349,16 @@ class SettingsAdapter(private val fragmentView: SettingsFragmentView, public val
         )
     }
 
+    // Rounds to the nearest step and clamps to range. A no-op for sliders that left stepSize 0.
+    private fun snapToStep(value: Float, item: SliderSetting): Float {
+        if (item.stepSize <= 0f) {
+            return value
+        }
+        val min = item.min.toFloat()
+        val steps = ((value - min) / item.stepSize).roundToInt()
+        return (min + steps * item.stepSize).coerceIn(min, item.max.toFloat())
+    }
+
     fun onSliderClick(item: SliderSetting, position: Int) {
         clickedItem = item
         clickedPosition = position
@@ -372,6 +382,11 @@ class SettingsAdapter(private val fragmentView: SettingsFragmentView, public val
         sliderBinding.slider.apply {
             valueFrom = item.min.toFloat()
             valueTo = item.max.toFloat()
+            stepSize = item.stepSize
+            // Material's Slider throws on an off-step value, and a stored one can be off - set
+            // before the step existed, or hand-edited. Snap sliderProgress itself, not just the
+            // slider: onClick() saves it, so unsnapped it would persist what was never shown.
+            sliderProgress = snapToStep(sliderProgress, item)
             value = sliderProgress
             textSliderValue?.addTextChangedListener(object : TextWatcher {
                 override fun afterTextChanged(s: Editable) {
@@ -383,7 +398,7 @@ class SettingsAdapter(private val fragmentView: SettingsFragmentView, public val
                         textInputLayout?.error = "Inappropriate value"
                     } else {
                         textInputLayout?.error = null
-                        value = textValue
+                        value = snapToStep(textValue, item)
                     }
                 }
 
@@ -417,16 +432,21 @@ class SettingsAdapter(private val fragmentView: SettingsFragmentView, public val
             .setPositiveButton(android.R.string.ok, this)
             .setNegativeButton(android.R.string.cancel, defaultCancelListener)
             .setNeutralButton(R.string.slider_default) { dialog: DialogInterface, which: Int ->
-                sliderBinding.slider?.value = when (item.setting) {
-                    is ScaledFloatSetting -> {
-                        val scaledSetting = item.setting as ScaledFloatSetting
-                        scaledSetting.defaultValue * scaledSetting.scale
-                    }
+                // Snapped like the other two assignments: a default that is not on the step would
+                // otherwise make Slider throw at the next layout pass.
+                sliderBinding.slider?.value = snapToStep(
+                    when (item.setting) {
+                        is ScaledFloatSetting -> {
+                            val scaledSetting = item.setting as ScaledFloatSetting
+                            scaledSetting.defaultValue * scaledSetting.scale
+                        }
 
-                    is FloatSetting -> (item.setting as FloatSetting).defaultValue
+                        is FloatSetting -> (item.setting as FloatSetting).defaultValue
 
-                    else -> item.defaultValue ?: 0f
-                }
+                        else -> item.defaultValue ?: 0f
+                    },
+                    item
+                )
                 onClick(dialog, which)
             }
             .show()
