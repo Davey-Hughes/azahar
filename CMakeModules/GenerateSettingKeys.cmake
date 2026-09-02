@@ -106,6 +106,8 @@ foreach(KEY IN ITEMS
     "audio_emulation"
     "enable_audio_stretching"
     "enable_realtime_audio"
+    "enable_speedup_audio"
+    "speedup_lowpass"
     "volume"
     "output_type"
     "output_device"

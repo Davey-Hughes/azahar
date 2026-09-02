@@ -579,6 +579,8 @@ System::ResultStatus System::Init(Frontend::EmuWindow& emu_window,
     dsp_core->SetSink(Settings::values.output_type.GetValue(),
                       Settings::values.output_device.GetValue());
     dsp_core->EnableStretching(Settings::values.enable_audio_stretching.GetValue());
+    dsp_core->SetSpeedupAudio(Settings::values.enable_speedup_audio.GetValue(),
+                              Settings::values.speedup_lowpass.GetValue());
 
 #ifdef ENABLE_SCRIPTING
     if (Settings::values.enable_rpc_server.GetValue()) {
@@ -809,6 +811,8 @@ void System::ApplySettings() {
         dsp_core->SetSink(Settings::values.output_type.GetValue(),
                           Settings::values.output_device.GetValue());
         dsp_core->EnableStretching(Settings::values.enable_audio_stretching.GetValue());
+        dsp_core->SetSpeedupAudio(Settings::values.enable_speedup_audio.GetValue(),
+                                  Settings::values.speedup_lowpass.GetValue());
 
         auto hid = Service::HID::GetModule(*this);
         if (hid) {

@@ -638,6 +638,12 @@ struct Values {
     SwitchableSetting<AudioEmulation> audio_emulation{AudioEmulation::HLE, Keys::audio_emulation};
     SwitchableSetting<bool> enable_audio_stretching{true, Keys::enable_audio_stretching};
     SwitchableSetting<bool> enable_realtime_audio{false, Keys::enable_realtime_audio};
+    // Both on by default. The cutoff is a reference divided by the achieved speed, and the
+    // filter is clamped to 0.45 * sample rate, so 22000 leaves it inaudible below about 1.5x
+    // and takes the edge off from there up. The range's maximum, 24000, is the "do not filter"
+    // sentinel - see AudioCore::kSpeedupLowPassOff in audio_core/speedup_params.h.
+    SwitchableSetting<bool> enable_speedup_audio{true, Keys::enable_speedup_audio};
+    SwitchableSetting<u16, true> speedup_lowpass{22000, 1000, 24000, Keys::speedup_lowpass};
     SwitchableSetting<float, true> volume{1.f, 0.f, 1.f, Keys::volume};
     Setting<AudioCore::SinkType> output_type{AudioCore::SinkType::Auto, Keys::output_type};
     Setting<std::string> output_device{"Auto", Keys::output_device};
