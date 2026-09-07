@@ -110,6 +110,8 @@ public:
     void EnableStretching(bool enable);
     /// Enable/Disable the off-speed audio path, and set its low-pass reference in Hz.
     void SetSpeedupAudio(bool enable, u16 lowpass_reference);
+    /// Enable/Disable ending the stream on a ramp; off, its edges are hard cuts.
+    void SetAudioRamp(bool enable);
     /// The core has stopped producing audio on purpose: end the stream on a ramp rather than
     /// wherever the waveform happens to be, and discard whatever it had already produced.
     /// Any thread.
@@ -180,6 +182,10 @@ private:
     // Ends the stream on a ramp and brings it back on one, on the last buffer before the sink.
     // Audio thread only; core_silenced is how the other threads reach it.
     StreamRamp ramp;
+    std::atomic<bool> enable_audio_ramp{true};
+    // Whether the ramp ran on the previous callback, so it can be dropped on the edge rather
+    // than frozen mid-tail. Audio thread only.
+    bool ramp_was_enabled = true;
     std::atomic<bool> core_silenced{false};
     // Whether the previous callback saw core_silenced, so the stretcher is resynced once per
     // silence rather than every callback of it.

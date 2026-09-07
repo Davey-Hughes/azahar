@@ -66,6 +66,10 @@ void DspInterface::SetSpeedupAudio(bool enable, u16 lowpass_reference) {
     speedup_lowpass_reference = lowpass_reference;
 }
 
+void DspInterface::SetAudioRamp(bool enable) {
+    enable_audio_ramp = enable;
+}
+
 void DspInterface::StreamEnd() {
     core_silenced.store(true, std::memory_order_release);
 }
@@ -341,7 +345,17 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
     // synthesises from that history is scaled like everything else. Where the source stopped
     // short, deliberately or not, the tail takes over from the frame it stopped on; when it
     // returns, the first frames ramp in.
-    ramp.Process(buffer, num_frames, frames_written);
+    const bool ramp_enabled = enable_audio_ramp.load();
+    if (ramp_was_enabled && !ramp_enabled) {
+        // Turned off mid-stream, possibly mid-tail. Drop that state rather than freeze it: a
+        // tail left pending would hold stream_settled false for good, and every JumpBegin()
+        // after it would wait out its whole deadline for a tail that will never play.
+        ramp = StreamRamp{};
+    }
+    ramp_was_enabled = ramp_enabled;
+    if (ramp_enabled) {
+        ramp.Process(buffer, num_frames, frames_written);
+    }
 
     // Signalled on the rising edge alone: a notify every callback would put a futex wake on the
     // audio thread once a buffer, where this fires only at a takedown, which is rare and is the
