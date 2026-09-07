@@ -416,7 +416,8 @@ static const char* android_config_default_file_content = (BOOST_HANA_STRING(R"(
 
 # Whether or not to enable the audio-stretching post-processing effect
 # This effect adjusts audio speed to match emulation speed and helps prevent audio stutter,
-# at the cost of increasing audio latency.
+# at the cost of increasing audio latency. While enable_speedup_audio is on, that setting
+# handles fast-forward and slow motion instead of this one.
 # 0: No, 1 (default): Yes
 )") DECLARE_KEY(enable_audio_stretching) BOOST_HANA_STRING(R"(
 
@@ -430,7 +431,9 @@ static const char* android_config_default_file_content = (BOOST_HANA_STRING(R"(
 # 0: No, 1 (default): Yes
 )") DECLARE_KEY(enable_audio_ramp) BOOST_HANA_STRING(R"(
 # Whether or not to preserve pitch while the emulation speed limit is not 100%
-# Time-stretches fast-forward and slow-motion audio instead of dropping samples.
+# Time-stretches fast-forward and slow-motion audio instead of dropping samples. Engages only
+# while the speed limit is set to something other than 100%, or turned off entirely; leave it
+# off and enable_audio_stretching handles those speeds instead.
 # 0: No, 1 (default): Yes
 )") DECLARE_KEY(enable_speedup_audio) BOOST_HANA_STRING(R"(
 

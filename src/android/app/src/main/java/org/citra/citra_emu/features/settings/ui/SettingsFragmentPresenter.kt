@@ -1882,6 +1882,15 @@ class SettingsFragmentPresenter(private val fragmentView: SettingsFragmentView) 
             )
             add(
                 SwitchSetting(
+                    BooleanSetting.ENABLE_REALTIME_AUDIO,
+                    R.string.realtime_audio,
+                    R.string.realtime_audio_description,
+                    BooleanSetting.ENABLE_REALTIME_AUDIO.key,
+                    BooleanSetting.ENABLE_REALTIME_AUDIO.defaultValue
+                )
+            )
+            add(
+                SwitchSetting(
                     BooleanSetting.SIMULATE_HEADPHONES_PLUGGED,
                     R.string.simulate_headphones_plugged,
                     R.string.simulate_headphones_plugged_description,
