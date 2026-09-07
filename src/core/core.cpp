@@ -761,6 +761,12 @@ void System::Reset() {
     // reloading.
     // TODO: Properly implement the reset
 
+    // Shutdown() closes the sink wherever the waveform stands; take the stream down on its
+    // tail first. The reloaded DSP opens on a ramp of its own.
+    if (dsp_core) {
+        dsp_core->JumpBegin();
+    }
+
     // Save the APT deliver arg and plugin loader context across resets.
     // This is needed as we don't currently support proper app jumping.
     if (auto apt = Service::APT::GetModule(*this)) {

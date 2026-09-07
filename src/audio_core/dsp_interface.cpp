@@ -3,9 +3,11 @@
 // Refer to the license.txt file included.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <numbers>
+#include <thread>
 #include "audio_core/dsp_interface.h"
 #include "audio_core/sink.h"
 #include "audio_core/sink_details.h"
@@ -41,6 +43,7 @@ void DspInterface::SetSink(AudioCore::SinkType sink_type, std::string_view audio
     // A new sink is a new stream: nothing of the old one to continue, and it opens on a ramp.
     ramp = StreamRamp{};
     silenced_seen = false;
+    stream_settled.store(true, std::memory_order_release);
     sink->SetCallback(
         [this](s16* buffer, std::size_t num_frames) { OutputCallback(buffer, num_frames); });
 }
@@ -65,6 +68,31 @@ void DspInterface::StreamEnd() {
 
 void DspInterface::StreamBegin() {
     core_silenced.store(false, std::memory_order_release);
+}
+
+bool DspInterface::JumpBegin() {
+    if (core_silenced.exchange(true, std::memory_order_acq_rel)) {
+        return false;
+    }
+    // The tail is the audio thread's to play. A load replaces this object and its sink, and a
+    // reset closes the sink outright, so unless the tail has reached the device by then it is
+    // cut off like the audio it was to replace: wait for a callback to report the stream
+    // settled, down with its tail out. A source that had already stopped, its tail long gone,
+    // is settled as it stands, and there is nothing to wait for. Bounded, since a sink that
+    // never calls back (null, or the libretro sink's immediate submission) settles nothing.
+    for (int i = 0; i < 50; i++) {
+        if (stream_settled.load(std::memory_order_acquire)) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+}
+
+void DspInterface::JumpEnd(bool ramped) {
+    if (ramped) {
+        StreamBegin();
+    }
 }
 
 void DspInterface::DiscardPending() {
@@ -310,6 +338,8 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
     // short, deliberately or not, the tail takes over from the frame it stopped on; when it
     // returns, the first frames ramp in.
     ramp.Process(buffer, num_frames, frames_written);
+
+    stream_settled.store(ramp.Down() && !ramp.InTail(), std::memory_order_release);
 
     // Implementation of the hardware volume slider
     // A cubic curve is used to approximate a linear change in human-perceived loudness

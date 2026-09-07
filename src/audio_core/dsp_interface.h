@@ -114,6 +114,12 @@ public:
     void StreamEnd();
     /// The core is producing again: the next frames ramp back in. Any thread.
     void StreamBegin();
+    /// Bracket a jump the frontend makes in the game's state, a load or a reset, so the splice
+    /// lands in silence: takes the stream down and waits, bounded, for the tail to reach the
+    /// sink. Returns false and does nothing if the stream is already down, so the ramp back up
+    /// stays with whatever took it down. Emulation thread.
+    bool JumpBegin();
+    void JumpEnd(bool ramped);
 
 protected:
     void OutputFrame(StereoFrame16 frame);
@@ -176,6 +182,10 @@ private:
     // Whether the previous callback saw core_silenced, so the stretcher is resynced once per
     // silence rather than every callback of it.
     bool silenced_seen = false;
+    // Whether the last callback found the stream settled: down, with its tail fully out. What
+    // JumpBegin() waits on, since it cannot read the ramp from its own thread. A fresh stream
+    // is settled, having nothing to take down.
+    std::atomic<bool> stream_settled{true};
     std::unique_ptr<Sink> sink;
 
     template <class Archive>
