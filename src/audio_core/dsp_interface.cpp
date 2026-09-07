@@ -2,8 +2,10 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <numbers>
 #include "audio_core/dsp_interface.h"
 #include "audio_core/sink.h"
 #include "audio_core/sink_details.h"
@@ -13,6 +15,14 @@
 #include "core/dumping/backend.h"
 
 namespace AudioCore {
+
+namespace {
+
+s16 ToSample(float v) {
+    return static_cast<s16>(std::clamp(std::lround(v * 32768.0f), -32768L, 32767L));
+}
+
+} // namespace
 
 DspInterface::DspInterface(Core::System& system_) : system(system_) {}
 
@@ -109,6 +119,46 @@ std::size_t DspInterface::FillFromWsola(s16* buffer, std::size_t num_frames) {
     return static_cast<std::size_t>(wsola.Read(buffer, static_cast<int>(num_frames), ratio));
 }
 
+void DspInterface::ArmHandoverFade() {
+    // At engage the stretcher opens behind the FIFO by the reserve it builds; at release that
+    // reserve is dropped and the FIFO takes over past it. Neither side continues the other, so
+    // dip through a short equal-power cross-fade from the level the stream stopped at rather
+    // than splice. Not re-armed mid-fade: the edge can arrive twice in quick succession.
+    if (fade_out_frames != 0) {
+        return;
+    }
+    fade_out_frames = kHandoverFadeFrames;
+    fade_out_from = fade_last_out;
+}
+
+void DspInterface::ApplyHandoverFade(s16* buffer, std::size_t num_frames) {
+    if (num_frames == 0) {
+        return;
+    }
+
+    const std::size_t n = std::min<std::size_t>(fade_out_frames, num_frames);
+    for (std::size_t j = 0; j < n; j++) {
+        const unsigned done = kHandoverFadeFrames - fade_out_frames + static_cast<unsigned>(j) + 1;
+        // Smoothstep the progress so the gain leaves and arrives with zero slope; a step in
+        // rate of change is heard as a blip at each end of the window.
+        const float u = static_cast<float>(done) / kHandoverFadeFrames;
+        const float th = 0.5f * std::numbers::pi_v<float> * (u * u * (3.0f - 2.0f * u));
+        const float g = std::cos(th);
+        const float gn = std::sin(th);
+        const float env = 1.0f - (1.0f - kHandoverDipGain) *
+                                     std::sin(std::numbers::pi_v<float> * static_cast<float>(done) /
+                                              kHandoverFadeFrames);
+        for (std::size_t ch = 0; ch < 2; ch++) {
+            const float in = buffer[(j * 2) + ch] / 32768.0f;
+            buffer[(j * 2) + ch] = ToSample(((fade_out_from[ch] * g) + (in * gn)) * env);
+        }
+    }
+    fade_out_frames -= static_cast<unsigned>(n);
+
+    fade_last_out[0] = buffer[((num_frames - 1) * 2) + 0] / 32768.0f;
+    fade_last_out[1] = buffer[((num_frames - 1) * 2) + 1] / 32768.0f;
+}
+
 void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
     // Determine if we should stretch based on the current emulation speed.
     // TODO: Only activate audio stretching when emulation speed goes below 95% threshold
@@ -129,6 +179,7 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
     if (off_speed) {
         if (!wsola_engaged) {
             wsola_engaged = true;
+            ArmHandoverFade();
             // Not Reset(): that memsets 256 KB, unfit for a realtime callback.
             wsola.BeginSession();
             // The requested speed is a ceiling the host may not reach, so a run seeded from it
@@ -160,6 +211,9 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
             if (std::isfinite(reached) && reached > 1.05) {
                 achieved_speed = reached;
             }
+        }
+        if (wsola_engaged) {
+            ArmHandoverFade();
         }
         wsola_engaged = false;
         if (performing_time_stretching) {
@@ -216,6 +270,8 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
             static_cast<double>(num_frames) / sink_sample_rate);
     }
     lowpass_was_active = lowpass_active;
+
+    ApplyHandoverFade(buffer, num_frames);
 
     // Implementation of the hardware volume slider
     // A cubic curve is used to approximate a linear change in human-perceived loudness
