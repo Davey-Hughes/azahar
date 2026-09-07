@@ -89,6 +89,7 @@ enum class BooleanSetting(
     ENABLE_AUDIO_STRETCHING(SettingKeys.enable_audio_stretching(), Settings.SECTION_AUDIO, true),
     ENABLE_REALTIME_AUDIO(SettingKeys.enable_realtime_audio(), Settings.SECTION_AUDIO, false),
     ENABLE_SPEEDUP_AUDIO(SettingKeys.enable_speedup_audio(), Settings.SECTION_AUDIO, true),
+    ENABLE_AUDIO_RAMP(SettingKeys.enable_audio_ramp(), Settings.SECTION_AUDIO, true),
     SIMULATE_HEADPHONES_PLUGGED(
         SettingKeys.simulate_headphones_plugged(),
         Settings.SECTION_AUDIO,

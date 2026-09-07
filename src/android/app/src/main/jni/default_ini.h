@@ -438,6 +438,12 @@ static const char* android_config_default_file_content = (BOOST_HANA_STRING(R"(
 # 1000 - 48000 in steps of 500, 22000 (default). 48000 disables the filter.
 )") DECLARE_KEY(speedup_lowpass) BOOST_HANA_STRING(R"(
 
+# Whether or not to fade audio out and back in at pauses, state loads, resets and dropouts
+# Ends the stream on a synthesized tail rather than cutting the waveform where it stands. Off,
+# those edges are hard cuts.
+# 0: No, 1 (default): Yes
+)") DECLARE_KEY(enable_audio_ramp) BOOST_HANA_STRING(R"(
+
 # Simulates whether headphones are plugged in to the emulated 3DS system
 # 0 (default): No, 1: Yes
 )") DECLARE_KEY(simulate_headphones_plugged) BOOST_HANA_STRING(R"(
