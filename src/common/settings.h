@@ -645,6 +645,11 @@ struct Values {
     // AudioCore::kSpeedupLowPassOff in audio_core/speedup_params.h.
     SwitchableSetting<bool> enable_speedup_audio{true, Keys::enable_speedup_audio};
     SwitchableSetting<u16, true> speedup_lowpass{22000, 1000, 48000, Keys::speedup_lowpass};
+    // On by default. AudioCore::StreamRamp (audio_core/stream_ramp.h) ends the output stream on
+    // a synthesized tail and brings it back on a fade, so a pause, a state load, a reset or an
+    // underrun lands in silence instead of cutting the waveform where it stands. Off, those
+    // edges are hard cuts.
+    SwitchableSetting<bool> enable_audio_ramp{true, Keys::enable_audio_ramp};
     SwitchableSetting<float, true> volume{1.f, 0.f, 1.f, Keys::volume};
     Setting<AudioCore::SinkType> output_type{AudioCore::SinkType::Auto, Keys::output_type};
     Setting<std::string> output_device{"Auto", Keys::output_device};
