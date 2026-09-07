@@ -4,7 +4,9 @@
 
 #pragma once
 
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <boost/serialization/access.hpp>
 #include "audio_core/audio_types.h"
@@ -184,8 +186,11 @@ private:
     bool silenced_seen = false;
     // Whether the last callback found the stream settled: down, with its tail fully out. What
     // JumpBegin() waits on, since it cannot read the ramp from its own thread. A fresh stream
-    // is settled, having nothing to take down.
+    // is settled, having nothing to take down. The audio thread signals the condition variable
+    // on the rising edge alone; the mutex is the waiter's, and the callback never takes it.
     std::atomic<bool> stream_settled{true};
+    std::mutex settled_mutex;
+    std::condition_variable settled_cv;
     std::unique_ptr<Sink> sink;
 
     template <class Archive>

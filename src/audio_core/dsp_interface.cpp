@@ -7,7 +7,6 @@
 #include <cmath>
 #include <cstddef>
 #include <numbers>
-#include <thread>
 #include "audio_core/dsp_interface.h"
 #include "audio_core/sink.h"
 #include "audio_core/sink_details.h"
@@ -23,6 +22,11 @@ namespace {
 s16 ToSample(float v) {
     return static_cast<s16>(std::clamp(std::lround(v * 32768.0f), -32768L, 32767L));
 }
+
+/// How long JumpBegin() gives the tail to reach the device before going ahead without it.
+/// Comfortably over StreamRamp's tail and the mute behind it, so it is a backstop against a
+/// sink that never calls back rather than a budget the ramp is expected to fit in.
+constexpr auto kJumpSettleTimeout = std::chrono::milliseconds(50);
 
 } // namespace
 
@@ -78,14 +82,13 @@ bool DspInterface::JumpBegin() {
     // reset closes the sink outright, so unless the tail has reached the device by then it is
     // cut off like the audio it was to replace: wait for a callback to report the stream
     // settled, down with its tail out. A source that had already stopped, its tail long gone,
-    // is settled as it stands, and there is nothing to wait for. Bounded, since a sink that
-    // never calls back (null, or the libretro sink's immediate submission) settles nothing.
-    for (int i = 0; i < 50; i++) {
-        if (stream_settled.load(std::memory_order_acquire)) {
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    // is settled as it stands, and there is nothing to wait for. Deadline-bounded, since a sink
+    // that never calls back (null, or the libretro sink's immediate submission) settles nothing;
+    // a wakeup lost between the predicate and the wait costs the deadline, not the tail.
+    const auto deadline = std::chrono::steady_clock::now() + kJumpSettleTimeout;
+    std::unique_lock lock{settled_mutex};
+    settled_cv.wait_until(lock, deadline,
+                          [this] { return stream_settled.load(std::memory_order_acquire); });
     return true;
 }
 
@@ -339,7 +342,18 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
     // returns, the first frames ramp in.
     ramp.Process(buffer, num_frames, frames_written);
 
-    stream_settled.store(ramp.Down() && !ramp.InTail(), std::memory_order_release);
+    // Signalled on the rising edge alone: a notify every callback would put a futex wake on the
+    // audio thread once a buffer, where this fires only at a takedown, which is rare and is the
+    // only time anyone is waiting. Never takes settled_mutex, so the callback cannot be made to
+    // wait on the thread that is waiting on it.
+    const bool settled = ramp.Down() && !ramp.InTail();
+    if (settled) {
+        if (!stream_settled.exchange(true, std::memory_order_acq_rel)) {
+            settled_cv.notify_all();
+        }
+    } else {
+        stream_settled.store(false, std::memory_order_release);
+    }
 
     // Implementation of the hardware volume slider
     // A cubic curve is used to approximate a linear change in human-perceived loudness
