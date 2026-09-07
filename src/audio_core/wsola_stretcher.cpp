@@ -131,8 +131,15 @@ int WsolaStretcher::Write(const s16* samples, int num_frames) {
 }
 
 int WsolaStretcher::Read(s16* samples, int num_frames, double ratio) {
+    // Overlap-add reaches full amplitude only once the accumulator carries a whole window, so
+    // the first hop after a reposition would ramp up from silence. Run one hop to charge the
+    // accumulator and drop its output.
+    if (!primed && CanSynthesise()) {
+        SynthesiseHop(ratio, false);
+    }
+
     while ((OutputFill() < num_frames) && CanSynthesise()) {
-        SynthesiseHop(ratio);
+        SynthesiseHop(ratio, true);
     }
 
     const int n = std::min(num_frames, OutputFill());
@@ -169,7 +176,7 @@ bool WsolaStretcher::CanSynthesise() const {
     return (write_pos >= frame_end) && (write_pos >= natural_end);
 }
 
-void WsolaStretcher::SynthesiseHop(double ratio) {
+void WsolaStretcher::SynthesiseHop(double ratio, bool emit) {
     int hop = static_cast<int>(std::lround(kSynthesisHop * ratio));
     if (hop < 1) {
         hop = 1;
@@ -185,11 +192,13 @@ void WsolaStretcher::SynthesiseHop(double ratio) {
         acc_r[i] += w * static_cast<float>(in_r[idx]);
     }
 
-    for (int i = 0; i < kSynthesisHop; i++) {
-        const int idx = static_cast<int>(out_write_pos & (kOutputCapacity - 1));
-        out_l[idx] = Saturate(acc_l[i]);
-        out_r[idx] = Saturate(acc_r[i]);
-        out_write_pos++;
+    if (emit) {
+        for (int i = 0; i < kSynthesisHop; i++) {
+            const int idx = static_cast<int>(out_write_pos & (kOutputCapacity - 1));
+            out_l[idx] = Saturate(acc_l[i]);
+            out_r[idx] = Saturate(acc_r[i]);
+            out_write_pos++;
+        }
     }
 
     std::memmove(acc_l, acc_l + kSynthesisHop, kSynthesisHop * sizeof(float));
