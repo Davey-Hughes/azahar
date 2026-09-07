@@ -1837,15 +1837,6 @@ class SettingsFragmentPresenter(private val fragmentView: SettingsFragmentView) 
             )
             add(
                 SwitchSetting(
-                    BooleanSetting.ENABLE_REALTIME_AUDIO,
-                    R.string.realtime_audio,
-                    R.string.realtime_audio_description,
-                    BooleanSetting.ENABLE_REALTIME_AUDIO.key,
-                    BooleanSetting.ENABLE_REALTIME_AUDIO.defaultValue
-                )
-            )
-            add(
-                SwitchSetting(
                     BooleanSetting.ENABLE_SPEEDUP_AUDIO,
                     R.string.speedup_audio,
                     R.string.speedup_audio_description,
@@ -1869,6 +1860,15 @@ class SettingsFragmentPresenter(private val fragmentView: SettingsFragmentView) 
                     isEnabled = BooleanSetting.ENABLE_SPEEDUP_AUDIO.boolean,
                     // As the spin box does. 47000 divides evenly by it, which Slider requires.
                     stepSize = 500f
+                )
+            )
+            add(
+                SwitchSetting(
+                    BooleanSetting.ENABLE_REALTIME_AUDIO,
+                    R.string.realtime_audio,
+                    R.string.realtime_audio_description,
+                    BooleanSetting.ENABLE_REALTIME_AUDIO.key,
+                    BooleanSetting.ENABLE_REALTIME_AUDIO.defaultValue
                 )
             )
             add(
