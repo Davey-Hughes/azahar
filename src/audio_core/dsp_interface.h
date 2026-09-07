@@ -105,6 +105,8 @@ public:
     Sink& GetSink();
     /// Enable/Disable audio stretching.
     void EnableStretching(bool enable);
+    /// Enable/Disable ending the stream on a ramp; off, its edges are hard cuts.
+    void SetAudioRamp(bool enable);
     /// The core has stopped producing audio on purpose: end the stream on a ramp rather than
     /// wherever the waveform happens to be, and discard whatever it had already produced.
     /// Any thread.
@@ -140,6 +142,10 @@ private:
     // Ends the stream on a ramp and brings it back on one, on the last buffer before the sink.
     // Audio thread only; core_silenced is how the other threads reach it.
     StreamRamp ramp;
+    std::atomic<bool> enable_audio_ramp{true};
+    // Whether the ramp ran on the previous callback, so it can be dropped on the edge rather
+    // than frozen mid-tail. Audio thread only.
+    bool ramp_was_enabled = true;
     std::atomic<bool> core_silenced{false};
     // Whether the last callback found the stream settled: down, with its tail fully out. What
     // JumpBegin() waits on, since it cannot read the ramp from its own thread. A fresh stream
