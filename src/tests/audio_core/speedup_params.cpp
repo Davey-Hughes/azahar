@@ -57,9 +57,15 @@ TEST_CASE("SpeedupLowPassCutoff", "[audio_core][speedup]") {
     REQUIRE_THAT(AudioCore::SpeedupLowPassCutoff(4.0, 24000 - 1, wide_open),
                  WithinRel(5999.75, 1e-9));
 
-    // The sentinel means off, at any speed.
+    // The sentinel means off, at any speed; so does zero, which would otherwise clamp to the
+    // floor and be the strongest filter rather than none.
     REQUIRE_THAT(AudioCore::SpeedupLowPassCutoff(4.0, AudioCore::kSpeedupLowPassOff, wide_open),
                  WithinRel(wide_open, 1e-9));
+    REQUIRE_THAT(AudioCore::SpeedupLowPassCutoff(4.0, 0, wide_open), WithinRel(wide_open, 1e-9));
+
+    // The range runs past Nyquist so the reference can sit above the rate: 24000 is a mild
+    // setting at 2x, not the sentinel it once was.
+    REQUIRE_THAT(AudioCore::SpeedupLowPassCutoff(2.0, 24000, wide_open), WithinRel(12000.0, 1e-9));
 
     // Never above wide_open, never below the 200 Hz floor.
     REQUIRE_THAT(AudioCore::SpeedupLowPassCutoff(1.1, 20000, wide_open),

@@ -11,8 +11,10 @@
 
 namespace AudioCore {
 
-/// Sentinel meaning "do not filter"; taken literally, 24000 would still filter at 12 kHz at 2x.
-constexpr u16 kSpeedupLowPassOff = 24000;
+/// Sentinel meaning "do not filter", at the top of the setting's range. The range runs well
+/// past Nyquist on purpose: the reference is divided by the speed, so reaching a mild cutoff at
+/// 2x or 3x needs a reference above the rate itself.
+constexpr u16 kSpeedupLowPassOff = 48000;
 
 /// Speed used when the frame limiter is off; Settings::GetFrameLimit() returns 0 for unlimited.
 constexpr double kUnlimitedSpeed = 10.0;
@@ -58,6 +60,7 @@ inline double SpeedupStretchRatio(double arrival_per_callback, std::size_t outpu
 }
 
 /// Low-pass cutoff, in Hz (wide_open = transparent); reference/speed gives the applied cutoff.
+/// Zero reads as off too: it would clamp to the floor, the strongest filter rather than none.
 inline double SpeedupLowPassCutoff(double speed, u16 reference, double wide_open) {
     if (wide_open <= kMinLowPassCutoff) {
         return wide_open;
@@ -65,7 +68,7 @@ inline double SpeedupLowPassCutoff(double speed, u16 reference, double wide_open
     if (speed <= 1.0) {
         return wide_open;
     }
-    if (reference >= kSpeedupLowPassOff) {
+    if (reference == 0 || reference >= kSpeedupLowPassOff) {
         return wide_open;
     }
 

@@ -1871,12 +1871,12 @@ class SettingsFragmentPresenter(private val fragmentView: SettingsFragmentView) 
                     // in audio_core/speedup_params.h. Mirrored by speedup_lowpass_spinbox in
                     // citra_qt/configuration/configure_audio.ui.
                     1000,
-                    24000,
+                    48000,
                     " Hz",
                     IntSetting.SPEEDUP_LOWPASS.key,
                     IntSetting.SPEEDUP_LOWPASS.defaultValue.toFloat(),
                     isEnabled = BooleanSetting.ENABLE_SPEEDUP_AUDIO.boolean,
-                    // As the spin box does. 23000 divides evenly by it, which Slider requires.
+                    // As the spin box does. 47000 divides evenly by it, which Slider requires.
                     stepSize = 500f
                 )
             )

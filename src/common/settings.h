@@ -645,10 +645,11 @@ struct Values {
     SwitchableSetting<bool> enable_audio_ramp{true, Keys::enable_audio_ramp};
     // Both on by default. The cutoff is a reference divided by the achieved speed, and the
     // filter is clamped to 0.45 * sample rate, so 22000 leaves it inaudible below about 1.5x
-    // and takes the edge off from there up. The range's maximum, 24000, is the "do not filter"
-    // sentinel - see AudioCore::kSpeedupLowPassOff in audio_core/speedup_params.h.
+    // and takes the edge off from there up. The range runs past Nyquist so a mild setting is
+    // reachable at 2x or 3x; its maximum, 48000, is the "do not filter" sentinel - see
+    // AudioCore::kSpeedupLowPassOff in audio_core/speedup_params.h.
     SwitchableSetting<bool> enable_speedup_audio{true, Keys::enable_speedup_audio};
-    SwitchableSetting<u16, true> speedup_lowpass{22000, 1000, 24000, Keys::speedup_lowpass};
+    SwitchableSetting<u16, true> speedup_lowpass{22000, 1000, 48000, Keys::speedup_lowpass};
     SwitchableSetting<float, true> volume{1.f, 0.f, 1.f, Keys::volume};
     Setting<AudioCore::SinkType> output_type{AudioCore::SinkType::Auto, Keys::output_type};
     Setting<std::string> output_device{"Auto", Keys::output_device};
