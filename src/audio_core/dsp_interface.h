@@ -137,6 +137,8 @@ private:
     void DiscardPending();
     std::size_t FillFromWsola(s16* buffer, std::size_t num_frames);
     void DrainFifoIntoWsola();
+    void ArmHandoverFade();
+    void ApplyHandoverFade(s16* buffer, std::size_t num_frames);
 
     Core::System& system;
 
@@ -185,6 +187,17 @@ private:
     double achieved_speed = 0.0;
     s64 last_written = 0;
     double sink_sample_rate = native_sample_rate;
+    // Cross-fade across a stretcher handover, in output frames. Kept short: both sides are the
+    // same material at different points, so a long overlap is heard for itself. The gain at
+    // its midpoint: lower attenuates the discontinuity the handover carries, at the cost of a
+    // deeper notch. Audio thread only.
+    static constexpr unsigned kHandoverFadeFrames = 256;
+    static constexpr float kHandoverDipGain = 0.15f;
+    unsigned fade_out_frames = 0;
+    std::array<float, 2> fade_out_from{};
+    // Last frame handed on after the low-pass and before the volume, normalised: the level a
+    // handover cross-fades away from.
+    std::array<float, 2> fade_last_out{};
     std::unique_ptr<Sink> sink;
     // What the sink was opened for, so a settings apply that changes neither can leave it be.
     SinkType current_sink_type{};
