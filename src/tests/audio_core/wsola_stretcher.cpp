@@ -264,6 +264,31 @@ TEST_CASE("WsolaStretcher Resync keeps synthesized output, BeginSession drops it
     REQUIRE(stretcher.OutputFill() == 0);
 }
 
+TEST_CASE("First hop after BeginSession is at full level", "[audio_core][speedup]") {
+    AudioCore::WsolaStretcher stretcher;
+    const auto input = MakeSine(440.0, 8192);
+    REQUIRE(stretcher.Write(input.data(), 8192) == 8192);
+
+    stretcher.BeginSession();
+    REQUIRE(stretcher.Write(input.data(), 4096) == 4096);
+
+    std::vector<s16> out(1024 * 2);
+    REQUIRE(stretcher.Read(out.data(), 1024, 1.0) == 1024);
+
+    const auto rms = [&out](int first, int last) {
+        double sum = 0.0;
+        for (int i = first; i < last; i++) {
+            const double v = out[static_cast<std::size_t>(i) * 2];
+            sum += v * v;
+        }
+        return std::sqrt(sum / (last - first));
+    };
+
+    // The accumulator carries only the rising half of a window after one hop, so without a
+    // charging hop the first frames of every session would fade in from silence.
+    REQUIRE(rms(0, 64) >= 0.8 * rms(512, 1024));
+}
+
 TEST_CASE("WsolaStretcher Resync recovers after input is consumed to exhaustion",
           "[audio_core][speedup]") {
     AudioCore::WsolaStretcher stretcher;
@@ -304,8 +329,9 @@ TEST_CASE("WsolaStretcher write floor follows natural_pos at high ratio", "[audi
     std::vector<s16> out(256 * 2);
     REQUIRE(stretcher.Read(out.data(), 256, 20.0) == 256);
 
+    // Three hops of 2560: one silent hop that charges the accumulator, two that fill 256 frames.
     const s64 analysis_pos = stretcher.TotalWritten() - stretcher.InputFill();
-    REQUIRE(analysis_pos == 5120);
+    REQUIRE(analysis_pos == 7680);
 
     // The ring is full, so Write can accept exactly the floor. Were the floor computed from
     // analysis_pos - kSearchRadius alone it would be 4096; natural_pos binds it strictly lower.

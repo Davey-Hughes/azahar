@@ -53,7 +53,8 @@ private:
     static s16 Saturate(float v);
 
     bool CanSynthesise() const;
-    void SynthesiseHop(double ratio);
+    /// With emit false the hop charges the accumulator and advances, but writes no output.
+    void SynthesiseHop(double ratio, bool emit);
     s64 FindBestOffset() const;
     double Energy(s64 pos) const;
     double Score(s64 pos, double ref_energy) const;
