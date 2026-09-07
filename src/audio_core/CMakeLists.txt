@@ -33,6 +33,7 @@ add_library(audio_core STATIC EXCLUDE_FROM_ALL
     sink_details.h
     speedup_lowpass.h
     speedup_params.h
+    stream_ramp.h
     static_input.cpp
     static_input.h
     time_stretch.cpp

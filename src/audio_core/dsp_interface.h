@@ -10,6 +10,7 @@
 #include "audio_core/audio_types.h"
 #include "audio_core/speedup_lowpass.h"
 #include "audio_core/speedup_params.h"
+#include "audio_core/stream_ramp.h"
 #include "audio_core/time_stretch.h"
 #include "audio_core/wsola_stretcher.h"
 #include "common/common_types.h"
@@ -107,6 +108,12 @@ public:
     void EnableStretching(bool enable);
     /// Enable/Disable the off-speed audio path, and set its low-pass reference in Hz.
     void SetSpeedupAudio(bool enable, u16 lowpass_reference);
+    /// The core has stopped producing audio on purpose: end the stream on a ramp rather than
+    /// wherever the waveform happens to be, and discard whatever it had already produced.
+    /// Any thread.
+    void StreamEnd();
+    /// The core is producing again: the next frames ramp back in. Any thread.
+    void StreamBegin();
 
 protected:
     void OutputFrame(StereoFrame16 frame);
@@ -119,6 +126,7 @@ private:
     void DrainFifoIntoWsola();
     void ArmHandoverFade();
     void ApplyHandoverFade(s16* buffer, std::size_t num_frames);
+    void DiscardPending();
 
     Core::System& system;
 
@@ -131,7 +139,6 @@ private:
     // bound the FIFO drops and the stretcher Resync()s across the gap rather than splicing; see
     // audio_core/tools/audiobench.cpp for how often that happens.
     Common::RingBuffer<s16, 0x2000, 2> fifo;
-    std::array<s16, 2> last_frame{};
     TimeStretcher time_stretcher;
 
     static constexpr std::size_t kPopChunkFrames = 2048;
@@ -162,6 +169,13 @@ private:
     // Last frame handed on after the low-pass and before the volume, normalised: the level a
     // handover cross-fades away from.
     std::array<float, 2> fade_last_out{};
+    // Ends the stream on a ramp and brings it back on one, on the last buffer before the sink.
+    // Audio thread only; core_silenced is how the other threads reach it.
+    StreamRamp ramp;
+    std::atomic<bool> core_silenced{false};
+    // Whether the previous callback saw core_silenced, so the stretcher is resynced once per
+    // silence rather than every callback of it.
+    bool silenced_seen = false;
     std::unique_ptr<Sink> sink;
 
     template <class Archive>

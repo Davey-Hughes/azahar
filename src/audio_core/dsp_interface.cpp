@@ -38,6 +38,9 @@ void DspInterface::SetSink(AudioCore::SinkType sink_type, std::string_view audio
     time_stretcher.SetOutputSampleRate(sink->GetNativeSampleRate());
     low_pass.Init(sink_sample_rate);
     achieved_speed = 0.0;
+    // A new sink is a new stream: nothing of the old one to continue, and it opens on a ramp.
+    ramp = StreamRamp{};
+    silenced_seen = false;
     sink->SetCallback(
         [this](s16* buffer, std::size_t num_frames) { OutputCallback(buffer, num_frames); });
 }
@@ -54,6 +57,28 @@ void DspInterface::EnableStretching(bool enable) {
 void DspInterface::SetSpeedupAudio(bool enable, u16 lowpass_reference) {
     enable_speedup_audio = enable;
     speedup_lowpass_reference = lowpass_reference;
+}
+
+void DspInterface::StreamEnd() {
+    core_silenced.store(true, std::memory_order_release);
+}
+
+void DspInterface::StreamBegin() {
+    core_silenced.store(false, std::memory_order_release);
+}
+
+void DspInterface::DiscardPending() {
+    // Produced before the stream was taken down; behind the tail it would only splice in.
+    while (fifo.Pop(pop_scratch.data(), kPopChunkFrames) > 0) {
+    }
+    if (!silenced_seen) {
+        silenced_seen = true;
+        // The stretcher's reserve and whatever it has synthesised are older still, and the
+        // frames that arrive when the core resumes are not continuous with them.
+        if (wsola_engaged) {
+            wsola.BeginSession();
+        }
+    }
 }
 
 void DspInterface::OutputFrame(StereoFrame16 frame) {
@@ -175,8 +200,17 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
     const double speed = SpeedupSpeedFromFrameLimit(frame_limit);
     const bool off_speed = speedup_enabled && SpeedupIsOffSpeed(speed);
 
+    // Taken down on purpose: nothing is popped, so the stretcher's bookkeeping stands still
+    // and picks up where it left off, and the ramp below fills the buffer with the tail.
+    const bool silenced = core_silenced.load(std::memory_order_acquire);
+    if (!silenced) {
+        silenced_seen = false;
+    }
+
     std::size_t frames_written = 0;
-    if (off_speed) {
+    if (silenced) {
+        DiscardPending();
+    } else if (off_speed) {
         if (!wsola_engaged) {
             wsola_engaged = true;
             ArmHandoverFade();
@@ -236,13 +270,11 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
         }
     }
 
-    if (frames_written > 0) {
-        std::memcpy(&last_frame[0], buffer + 2 * (frames_written - 1), 2 * sizeof(s16));
-    }
-
-    // Hold last emitted frame; this prevents popping.
-    for (std::size_t i = frames_written; i < num_frames; i++) {
-        std::memcpy(buffer + 2 * i, &last_frame[0], 2 * sizeof(s16));
+    // What the source did not fill is the ramp's to fill, below; the low-pass sees silence
+    // there in the meantime, which is what the tail decays to.
+    if (frames_written < num_frames) {
+        std::memset(buffer + (frames_written * 2), 0,
+                    (num_frames - frames_written) * 2 * sizeof(s16));
     }
 
     // The stretcher keys off requested speed; the filter keys off achieved speed, since it exists
@@ -272,6 +304,12 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
     lowpass_was_active = lowpass_active;
 
     ApplyHandoverFade(buffer, num_frames);
+
+    // Last before the volume, so the history it keeps is what was played and the tail it
+    // synthesises from that history is scaled like everything else. Where the source stopped
+    // short, deliberately or not, the tail takes over from the frame it stopped on; when it
+    // returns, the first frames ramp in.
+    ramp.Process(buffer, num_frames, frames_written);
 
     // Implementation of the hardware volume slider
     // A cubic curve is used to approximate a linear change in human-perceived loudness
