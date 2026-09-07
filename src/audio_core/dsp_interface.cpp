@@ -216,7 +216,8 @@ void DspInterface::ApplyHandoverFade(s16* buffer, std::size_t num_frames) {
 }
 
 void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
-    // Determine if we should stretch based on the current emulation speed.
+    // Latch the stretching setting for this callback, arming a flush if it has just been
+    // turned off so the stretcher's remainder is played out rather than stranded.
     // TODO: Only activate audio stretching when emulation speed goes below 95% threshold
     //       (see #2487) -OS
     if (performing_time_stretching && !enable_time_stretching) {
