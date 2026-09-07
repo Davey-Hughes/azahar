@@ -173,12 +173,44 @@
        </widget>
       </item>
       <item>
-       <widget class="QCheckBox" name="toggle_audio_stretching">
+       <widget class="QCheckBox" name="toggle_realtime_audio">
         <property name="toolTip">
-         <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Stretches audio to cover brief slowdowns when your device cannot hold full speed, so they do not become stutter. Costs some audio latency. This does not apply while fast-forwarding or in slow motion - those are handled by &quot;Preserve pitch when changing speed&quot;.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+         <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Scales audio playback speed to account for drops in emulation framerate. This means that audio will play at full speed even while the application framerate is low. May cause audio desync issues.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
         </property>
         <property name="text">
-         <string>Enable audio stretching</string>
+         <string>Enable realtime audio</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="simulate_headphones_plugged">
+        <property name="toolTip">
+         <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Simulates whether headphones are plugged in to the emulated 3DS system.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+        </property>
+        <property name="text">
+         <string>Simulate headphones plugged in</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="stretching_group">
+     <property name="toolTip">
+      <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Time-stretches audio so it stays continuous and keeps its pitch when the emulator is not producing samples at the rate the sound device consumes them. The two cases below are handled separately.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+     </property>
+     <property name="title">
+      <string>Audio stretching</string>
+     </property>
+     <layout class="QVBoxLayout" name="stretching_group_layout">
+      <item>
+       <widget class="QCheckBox" name="toggle_audio_stretching">
+        <property name="toolTip">
+         <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Stretches audio to cover brief slowdowns when your device cannot hold full speed, so they do not become stutter. Costs audio latency whenever this is enabled, not only while slow. Unless the option below is enabled, this handles fast-forward and slow motion as well.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+        </property>
+        <property name="text">
+         <string>Prevent stutter when emulation slows down</string>
         </property>
        </widget>
       </item>
@@ -191,10 +223,10 @@
          <string>Fade audio instead of cutting it</string>
        <widget class="QCheckBox" name="toggle_speedup_audio">
         <property name="toolTip">
-         <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Preserves pitch when fast-forwarding or slowing down, instead of dropping audio. Only active when the speed limit is not 100%.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+         <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Switches to a pitch-preserving stretcher while fast-forwarding or in slow motion, instead of dropping samples. Engages whenever the speed limit is set to anything other than 100%, or turned off entirely. With this off, the option above handles those speeds instead.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
         </property>
         <property name="text">
-         <string>Preserve pitch when changing speed</string>
+         <string>Preserve pitch when fast-forwarding or in slow motion</string>
         </property>
        </widget>
       </item>
@@ -203,7 +235,7 @@
         <item>
          <widget class="QLabel" name="speedup_lowpass_label">
           <property name="toolTip">
-           <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Softens harsh fast-forward audio. Set it as high as still sounds good; the maximum turns the filter off.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Softens harsh fast-forward audio: the cutoff is this value divided by the current speed, so faster playback is dulled more. Only applies above normal speed. The maximum turns the filter off.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
           </property>
           <property name="text">
            <string>Fast-forward low-pass:</string>
@@ -213,7 +245,7 @@
         <item>
          <widget class="QSpinBox" name="speedup_lowpass_spinbox">
           <property name="toolTip">
-           <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Softens harsh fast-forward audio. Set it as high as still sounds good; the maximum turns the filter off.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Softens harsh fast-forward audio: the cutoff is this value divided by the current speed, so faster playback is dulled more. Only applies above normal speed. The maximum turns the filter off.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
           </property>
           <!-- The maximum is AudioCore::kSpeedupLowPassOff, the "do not filter" sentinel
                (audio_core/speedup_params.h). This pair mirrors the range on
@@ -234,26 +266,6 @@
          </widget>
         </item>
        </layout>
-      </item>
-      <item>
-       <widget class="QCheckBox" name="toggle_realtime_audio">
-        <property name="toolTip">
-         <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Scales audio playback speed to account for drops in emulation framerate. This means that audio will play at full speed even while the application framerate is low. May cause audio desync issues.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
-        </property>
-        <property name="text">
-         <string>Enable realtime audio</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QCheckBox" name="simulate_headphones_plugged">
-        <property name="toolTip">
-         <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Simulates whether headphones are plugged in to the emulated 3DS system.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
-        </property>
-        <property name="text">
-         <string>Simulate headphones plugged in</string>
-        </property>
-       </widget>
       </item>
      </layout>
     </widget>
@@ -311,6 +323,9 @@
   <tabstop>volume_slider</tabstop>
   <tabstop>output_type_combo_box</tabstop>
   <tabstop>output_device_combo_box</tabstop>
+  <tabstop>toggle_audio_stretching</tabstop>
+  <tabstop>toggle_speedup_audio</tabstop>
+  <tabstop>speedup_lowpass_spinbox</tabstop>
   <tabstop>input_type_combo_box</tabstop>
   <tabstop>input_device_combo_box</tabstop>
  </tabstops>
