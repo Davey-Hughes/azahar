@@ -88,6 +88,42 @@ TEST_CASE("SpeedupLowPass smooths rather than jumps", "[audio_core][speedup]") {
     REQUIRE(filter.Cutoff() > 1000.0);
 }
 
+TEST_CASE("SpeedupLowPass moves its coefficients without ringing", "[audio_core][speedup]") {
+    constexpr std::size_t block = 256;
+    constexpr std::size_t blocks = 16;
+    constexpr std::size_t half = block * blocks;
+
+    AudioCore::SpeedupLowPass filter;
+    filter.Init(kSampleRate);
+
+    // Low enough that the tone's own slope is small next to any transient the filter adds.
+    auto samples = MakeSine(50.0, half * 2);
+    for (std::size_t b = 0; b < blocks; b++) {
+        filter.Process(&samples[b * block * 2], block, filter.WideOpenCutoff(),
+                       block / kSampleRate);
+    }
+    for (std::size_t b = blocks; b < 2 * blocks; b++) {
+        filter.Process(&samples[b * block * 2], block, 2000.0, block / kSampleRate);
+    }
+
+    const auto largest_step = [&samples](std::size_t first, std::size_t last) {
+        double largest = 0.0;
+        for (std::size_t i = first + 1; i < last; i++) {
+            const double d = static_cast<double>(samples[i * 2]) - samples[(i - 1) * 2];
+            largest = std::max(largest, std::fabs(d));
+        }
+        return largest;
+    };
+
+    // A transposed direct-form biquad's state was produced under the previous coefficients, so
+    // replacing them in one step per block leaves the two inconsistent and the filter rings at
+    // every block edge while the cutoff slides. Spread across the block, it must not.
+    const double steady = largest_step(half - 1024, half);
+    const double sliding = largest_step(half, 2 * half);
+    CAPTURE(steady, sliding);
+    REQUIRE(sliding <= 1.5 * steady);
+}
+
 TEST_CASE("SpeedupLowPass clamps overshoot instead of wrapping", "[audio_core][speedup]") {
     constexpr int num_frames = 512;
     constexpr int half_period = 32; // about 500 Hz at 32728 Hz

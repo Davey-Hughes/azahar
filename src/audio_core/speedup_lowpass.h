@@ -47,12 +47,31 @@ public:
         return cur_cutoff >= (wide_open * kBypassThreshold);
     }
 
-    /// Advance the smoothed cutoff by one block, then filter in place.
+    /// Advance the smoothed cutoff by one block, then filter in place. The coefficients are
+    /// interpolated across the block rather than replaced in one go: a transposed direct-form
+    /// biquad's state encodes its past under the coefficients that produced it, so a step leaves
+    /// the two inconsistent and the filter rings at every block edge while the cutoff slides.
     void Process(s16* samples, std::size_t num_frames, double target_hz, double block_seconds) {
+        if (num_frames == 0) {
+            return;
+        }
+
+        double from[2][5];
+        double to[2][5];
+        for (int s = 0; s < 2; s++) {
+            stages[s].Snapshot(from[s]);
+        }
         Smooth(target_hz, block_seconds);
+        for (int s = 0; s < 2; s++) {
+            stages[s].Snapshot(to[s]);
+        }
         const bool bypass = Bypassed();
 
         for (std::size_t i = 0; i < num_frames; i++) {
+            const double t = static_cast<double>(i + 1) / static_cast<double>(num_frames);
+            for (int s = 0; s < 2; s++) {
+                stages[s].Lerp(from[s], to[s], t);
+            }
             for (std::size_t ch = 0; ch < 2; ch++) {
                 // Runs even when bypassed: its state must stay in step with the signal, or
                 // re-engaging would click.
@@ -61,6 +80,12 @@ public:
                     samples[(i * 2) + ch] = Saturate(y);
                 }
             }
+        }
+
+        // Land exactly on the designed set, so rounding in the interpolation cannot accumulate
+        // across blocks.
+        for (int s = 0; s < 2; s++) {
+            stages[s].Restore(to[s]);
         }
     }
 
@@ -121,6 +146,30 @@ private:
             z1[ch] = (b1 * x) - (a1 * y) + z2[ch];
             z2[ch] = (b2 * x) - (a2 * y);
             return y;
+        }
+
+        void Snapshot(double out[5]) const {
+            out[0] = b0;
+            out[1] = b1;
+            out[2] = b2;
+            out[3] = a1;
+            out[4] = a2;
+        }
+
+        void Restore(const double in[5]) {
+            b0 = in[0];
+            b1 = in[1];
+            b2 = in[2];
+            a1 = in[3];
+            a2 = in[4];
+        }
+
+        void Lerp(const double from[5], const double to[5], double t) {
+            b0 = from[0] + ((to[0] - from[0]) * t);
+            b1 = from[1] + ((to[1] - from[1]) * t);
+            b2 = from[2] + ((to[2] - from[2]) * t);
+            a1 = from[3] + ((to[3] - from[3]) * t);
+            a2 = from[4] + ((to[4] - from[4]) * t);
         }
     };
 
