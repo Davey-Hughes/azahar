@@ -143,6 +143,9 @@ private:
     // touched from SetSpeedupAudio(), which runs on a different thread.
     bool lowpass_was_active = false;
     double arrival_avg = 0.0;
+    // Speed the host actually reached during the last off-speed run, banked at disengage; 0
+    // until one has happened. Audio thread only.
+    double achieved_speed = 0.0;
     s64 last_written = 0;
     double sink_sample_rate = native_sample_rate;
     std::array<s16, kPopChunkFrames * 2> pop_scratch{};

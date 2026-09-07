@@ -2,6 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <cmath>
 #include <cstddef>
 #include "audio_core/dsp_interface.h"
 #include "audio_core/sink.h"
@@ -26,6 +27,7 @@ void DspInterface::SetSink(AudioCore::SinkType sink_type, std::string_view audio
     sink_sample_rate = static_cast<double>(sink->GetNativeSampleRate());
     time_stretcher.SetOutputSampleRate(sink->GetNativeSampleRate());
     low_pass.Init(sink_sample_rate);
+    achieved_speed = 0.0;
     sink->SetCallback(
         [this](s16* buffer, std::size_t num_frames) { OutputCallback(buffer, num_frames); });
 }
@@ -119,7 +121,8 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
 
     // Read once: it can flip mid-callback, and both branches below must agree on it.
     const bool speedup_enabled = enable_speedup_audio.load();
-    const double speed = SpeedupSpeedFromFrameLimit(Settings::GetFrameLimit());
+    const auto frame_limit = Settings::GetFrameLimit();
+    const double speed = SpeedupSpeedFromFrameLimit(frame_limit);
     const bool off_speed = speedup_enabled && SpeedupIsOffSpeed(speed);
 
     std::size_t frames_written = 0;
@@ -128,7 +131,18 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
             wsola_engaged = true;
             // Not Reset(): that memsets 256 KB, unfit for a realtime callback.
             wsola.BeginSession();
-            arrival_avg = static_cast<double>(num_frames) * speed;
+            // The requested speed is a ceiling the host may not reach, so a run seeded from it
+            // starts wrong and spends the run converging. Seed from what the last run reached
+            // instead, still capped at the request while the limiter is on; the first run after
+            // a sink change has nothing banked and seeds from the request as before.
+            double anchor = speed;
+            if (speed > 1.05 && achieved_speed > 1.05) {
+                anchor = achieved_speed;
+                if (frame_limit != 0 && anchor > speed) {
+                    anchor = speed;
+                }
+            }
+            arrival_avg = static_cast<double>(num_frames) * anchor;
             // Drain first, so last_written's delta reflects what arrives after engaging, not the
             // whole backlog in one lump.
             DrainFifoIntoWsola();
@@ -140,6 +154,13 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
         }
         frames_written = FillFromWsola(buffer, num_frames);
     } else {
+        if (wsola_engaged && num_frames > 0) {
+            // Bank the speed this run actually reached, before the next engage seeds from it.
+            const double reached = arrival_avg / static_cast<double>(num_frames);
+            if (std::isfinite(reached) && reached > 1.05) {
+                achieved_speed = reached;
+            }
+        }
         wsola_engaged = false;
         if (performing_time_stretching) {
             // Not a bare Pop(): that value-inits a vector to the FIFO's whole capacity every
