@@ -74,6 +74,7 @@ void OutputPipeline::Reset() {
     flush_tail = 0;
     trim_credit = 0;
     speed_entries = 0;
+    stream_seen = false;
     time_stretcher.SetRatio(1.0);
     last = {};
     fade_out_frames = 0;
@@ -148,14 +149,19 @@ std::size_t OutputPipeline::FillTarget(std::size_t num_frames) const {
 }
 
 std::size_t OutputPipeline::HandoverLow(std::size_t num_frames) const {
-    return PrefillTarget(num_frames);
+    // The fill target, not the prefill target: Stretch holds its 125 ms of backlog plus
+    // about a round of residency, and Drain, floored at ratio 1.0, cannot hold more, so a
+    // bound that grows twice with the callback size is out of reach at large callbacks
+    // (measured at 2048: never handed over). The beat's trough under the fill target is a
+    // burst down, still above the engage depth.
+    return FillTarget(num_frames);
 }
 
 std::size_t OutputPipeline::HandoverHigh(std::size_t num_frames) const {
-    // One output batch over the prefill target: the excess the flush brings, which the
+    // One output batch over the fill target: the excess the flush brings, which the
     // splicer trims at kTrimRate, a WSOLA-style time compression for under a second rather
     // than a skip. Lower would wait on the drain's residency cycling through its trough.
-    return PrefillTarget(num_frames) + time_stretcher.OutputBatchFrames();
+    return FillTarget(num_frames) + time_stretcher.OutputBatchFrames();
 }
 
 std::size_t OutputPipeline::EngageDepth(std::size_t num_frames) const {
@@ -186,6 +192,11 @@ void OutputPipeline::RenderChunk(s16* out, std::size_t num_frames) {
         // discarded below, and the ramp fills the buffer with the tail. Bypass refills before
         // it plays again.
         prefilling = true;
+    } else if (!stream_seen) {
+        // Nothing has arrived yet, or this is the first callback to see anything: what it
+        // sees covers part of an interval, and the window would read that as a deficit for
+        // its first second, 5% at 2048-frame callbacks. It sets the baseline only.
+        stream_seen = fifo_now > 0;
     } else {
         // Frames that arrived since the last callback, over the frames asked for. Arrivals
         // come a video frame at a time, so a single reading is 0 or 2 as often as 1: the fast
@@ -193,8 +204,9 @@ void OutputPipeline::RenderChunk(s16* out, std::size_t num_frames) {
         // the slow one is a ratio of sums over kSpeedWindowFrames, and reads 1.0 until it
         // holds enough to be within a couple of percent.
         const std::size_t arrived = fifo_now >= fifo_left ? fifo_now - fifo_left : 0;
-        const double alpha = std::min(1.0, static_cast<double>(num_frames) /
-                                               (kSpeedTimeConstant * native_sample_rate));
+        const double alpha =
+            std::min(kSpeedAlphaMax,
+                     static_cast<double>(num_frames) / (kSpeedTimeConstant * native_sample_rate));
         speed_fast +=
             ((static_cast<double>(arrived) / static_cast<double>(num_frames)) - speed_fast) * alpha;
         // The ring holds one entry per callback; the window is the most recent entries that
@@ -544,8 +556,11 @@ void OutputPipeline::DiscardPending() {
 }
 
 std::size_t OutputPipeline::FlushYield() const {
+    // The content less a seek window: a matched join restores what the flush fell short
+    // of from the fed tail, and a declined one drops the tail by the flush's estimate, so
+    // either way the stash holds the content within the last round's offset.
     const std::size_t inside = time_stretcher.OutputBacklog() + time_stretcher.InputResidency();
-    const std::size_t short_by = time_stretcher.FlushShortfall();
+    const std::size_t short_by = time_stretcher.SeekFrames();
     return inside > short_by ? inside - short_by : 0;
 }
 

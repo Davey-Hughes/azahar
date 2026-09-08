@@ -32,6 +32,9 @@ public:
     static constexpr unsigned kJoinSearch = 2048;
     /// The fraction of the reference's energy a join's best mismatch may reach; see JoinFlush().
     static constexpr float kJoinAcceptFraction = 0.5f;
+    /// Under this fraction of the reference's energy, the best period's mismatch says the
+    /// material is periodic, and only a whole period of it is cut; see Cut().
+    static constexpr float kPeriodicFraction = 0.5f;
 
     struct Result {
         std::size_t written;  // frames written to out
@@ -52,8 +55,19 @@ public:
             const std::size_t max_p = std::min<std::size_t>(
                 {static_cast<std::size_t>(kMaxPeriod), budget, avail - num_frames});
             if (max_p >= kMinPeriod) {
-                p = Find(a, avail, max_p);
-                if (p == 0) {
+                // A whole period of the material, or nothing: with the budget under the
+                // material's period, the best fit within it is a phase step. So search the
+                // whole range first, take its period when it fits, decline when it does not
+                // and the material is periodic, and take the best fit within the budget
+                // only where there is no period to speak of.
+                const std::size_t full_max =
+                    std::min<std::size_t>(static_cast<std::size_t>(kMaxPeriod), avail - num_frames);
+                float score = 0.0f;
+                float energy = 0.0f;
+                p = Find(a, avail, full_max, &score, &energy);
+                if (p > max_p) {
+                    p = score <= kPeriodicFraction * energy ? 0 : Find(a, avail, max_p);
+                } else if (p == 0) {
                     // Nothing to match in silence, and nothing to hear: drop the silent run,
                     // but only that, so whatever follows keeps its onset.
                     const std::size_t silent = LeadingSilence(a, max_p);
@@ -198,12 +212,14 @@ private:
         return static_cast<s16>(
             std::lround((static_cast<float>(from) * (1.0f - w)) + (static_cast<float>(to) * w)));
     }
-    static std::size_t Find(const s16* a, std::size_t avail, std::size_t max_p) {
+    static std::size_t Find(const s16* a, std::size_t avail, std::size_t max_p,
+                            float* score = nullptr, float* energy = nullptr) {
         return FindPeriod(
             [a](unsigned k) {
                 return static_cast<float>(a[k * 2]) + static_cast<float>(a[(k * 2) + 1]);
             },
-            static_cast<unsigned>(avail), kMinPeriod, static_cast<unsigned>(max_p), kCorrFrames);
+            static_cast<unsigned>(avail), kMinPeriod, static_cast<unsigned>(max_p), kCorrFrames,
+            score, energy);
     }
     /// Frames of silence from the front, at most `limit`.
     static std::size_t LeadingSilence(const s16* a, std::size_t limit) {

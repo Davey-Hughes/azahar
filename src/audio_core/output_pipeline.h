@@ -109,12 +109,12 @@ public:
     /// audio plus one callback. One burst is what a late burst costs, the second is the slack
     /// a slowdown is detected within.
     std::size_t FillTarget(std::size_t num_frames) const;
-    /// What the flush must put in the stash for Drain to hand over, at the least it can: at
-    /// least the prefill target, so the beat's trough stays above the engage depth, and at
+    /// What the handover must put in the stash for Drain to hand over, at the least it can:
+    /// at least the fill target, so the beat's trough stays above the engage depth, and at
     /// most one output batch over it. The content falls a tenth of a callback per callback
     /// in Drain, so the upper bound is crossed on the way down and is where the handover
-    /// lands; the join then restores what the flush fell short of, so the excess the trim
-    /// removes at kTrimRate is one batch plus up to that shortfall, about a second's worth.
+    /// lands, and the excess the trim removes at kTrimRate is one batch plus the last
+    /// round's offset, about a second's worth.
     std::size_t HandoverLow(std::size_t num_frames) const;
     std::size_t HandoverHigh(std::size_t num_frames) const;
     /// Below this depth Bypass engages the stretcher: one callback plus half a burst, so an
@@ -158,9 +158,8 @@ private:
     void DiscardPending();
     std::size_t WarmDiscardNeeded() const;
     std::size_t Excess(std::size_t num_frames) const;
-    /// The least a flush now would put in the stash, what the handover band is judged on:
-    /// the content less what a flush can fall short of. A matched join gets the shortfall
-    /// back from the fed tail.
+    /// The least a handover now would put in the stash, what the handover band is judged
+    /// on: the content less the last round's offset, a seek window at most.
     std::size_t FlushYield() const;
     /// Arms the fade to begin `offset` frames into the output that follows, from the level
     /// just before it; at 0, from the last frame handed on.
@@ -168,6 +167,10 @@ private:
     void ApplySeamFade(s16* buffer, std::size_t num_frames);
 
     static constexpr double kSpeedTimeConstant = 0.3; // seconds, the fast estimate
+    // The most one callback moves the fast estimate. Callbacks over a tenth of the time
+    // constant (OpenAL Soft's chunks, cubeb at a high device minimum) would otherwise
+    // read each one's whole burst count, three or four, as the speed.
+    static constexpr double kSpeedAlphaMax = 0.1;
     // The slow estimate's window. Its precision is one burst over its length, since a burst
     // either lands inside the window or not: ten seconds gives 0.17%, enough to tell a host
     // at 99.5%, which Bypass cannot serve, from one at full speed. Two seconds could not.
@@ -214,6 +217,7 @@ private:
     // short EMA that answers in a tenth of a second but dips to ~0.95 on every burst gap.
     double speed = 1.0;
     bool speed_settled = false;
+    bool stream_seen = false;      // whether a full interval of arrivals has been seen yet
     std::size_t speed_entries = 0; // real entries in the ring, up to kSpeedWindowMax
     double speed_fast = 1.0;
     std::array<std::size_t, kSpeedWindowMax> arrivals{};
