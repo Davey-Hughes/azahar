@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -192,7 +193,17 @@ private:
     // Callbacks the low-water window spans. The emulator's 60 Hz bursts beat against the
     // sink's callbacks, so the depth sawtooths over a cycle of about 15 callbacks for any
     // power-of-two callback size; a window shorter than that sees only the crest.
-    static constexpr std::size_t kLowWaterWindow = 32;
+    // The low-water window: 32 callbacks up to 512 frames each, which is two beat cycles
+    // at 512 and more at smaller sizes, and the same half second above that (16 at 1024, 8
+    // at 2048), where 32 callbacks were two seconds the trim waited out after every
+    // handover. The beat cycle is about four callbacks at 2048 and eight at 1024.
+    static constexpr std::size_t kLowWaterFrames = 16384;
+    static constexpr std::size_t kLowWaterWindowMax = 32;
+    static constexpr std::size_t kLowWaterWindowMin = 4;
+    static std::size_t LowWaterEntries(std::size_t num_frames) {
+        return std::clamp((kLowWaterFrames + num_frames - 1) / num_frames, kLowWaterWindowMin,
+                          kLowWaterWindowMax);
+    }
 
     // Filled by DspInterface::OutputFrame() on the emulation thread, drained here.
     Common::RingBuffer<s16, kMaxCallbackFrames, 2> fifo;
@@ -228,11 +239,12 @@ private:
     // Bypass emits nothing until the buffer first reaches the fill target: at reset, and after
     // each silence.
     bool prefilling = true;
-    // Depth at the start of each of the last kLowWaterWindow callbacks: excess is judged on
-    // the window's minimum, since arrivals come a burst at a time and an instantaneous depth
-    // would trigger cuts at the right average depth. Each cut lowers every entry by what it
-    // removed, so the minimum stays what the trough would be now rather than what it was.
-    std::array<std::size_t, kLowWaterWindow> depth_window{};
+    // Depth at the start of each of the last LowWaterEntries() callbacks: excess is judged
+    // on the window's minimum, since arrivals come a burst at a time and an instantaneous
+    // depth would trigger cuts at the right average depth. Each cut lowers every entry by
+    // what it removed, so the minimum stays what the trough would be now rather than what
+    // it was.
+    std::array<std::size_t, kLowWaterWindowMax> depth_window{};
     // Whether the trim may cut now: grows by kTrimRate of each Bypass callback, capped at
     // two minimum periods (or one callback's accrual plus one, at large callbacks) so a
     // stale window cannot prepay a burst, and each cut is charged in full, into debt for a

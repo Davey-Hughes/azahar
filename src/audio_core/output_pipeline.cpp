@@ -358,7 +358,7 @@ std::size_t OutputPipeline::RenderBypass(s16* out, std::size_t num_frames, Rende
         prefilling = false;
     }
     depth_window[window_pos] = stats.depth;
-    window_pos = (window_pos + 1) % kLowWaterWindow;
+    window_pos = (window_pos + 1) % kLowWaterWindowMax;
     std::size_t budget = 0;
     if (flush_left > 0) {
         // Flushed frames play out untouched. When the boundary is about to fall inside a
@@ -571,9 +571,11 @@ std::size_t OutputPipeline::FlushYield() const {
 }
 
 std::size_t OutputPipeline::Excess(std::size_t num_frames) const {
+    const std::size_t entries = LowWaterEntries(num_frames);
     std::size_t low_water = std::numeric_limits<std::size_t>::max();
-    for (std::size_t i = 0; i < kLowWaterWindow; i++) {
-        low_water = std::min(low_water, depth_window[i]);
+    for (std::size_t back = 1; back <= entries; back++) {
+        low_water = std::min(
+            low_water, depth_window[(window_pos + kLowWaterWindowMax - back) % kLowWaterWindowMax]);
     }
     const std::size_t fill_floor = FillTarget(num_frames);
     return low_water > fill_floor ? low_water - fill_floor : 0;
