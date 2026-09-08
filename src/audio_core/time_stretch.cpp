@@ -23,6 +23,11 @@ TimeStretcher::TimeStretcher() : sound_touch(std::make_unique<soundtouch::SoundT
     sound_touch->setSampleRate(native_sample_rate);
     sound_touch->setPitch(1.0);
     sound_touch->setTempo(1.0);
+    // SoundTouch runs its anti-alias FIR whenever the rate is at or above 1.0, including
+    // exactly 1.0, where nothing is resampled. The rate here never changes, so the filter
+    // only costs CPU and smears the output. Off, the body of each round is a verbatim copy
+    // of the input, which the pipeline test relies on to locate frames.
+    sound_touch->setSetting(SETTING_USE_AA_FILTER, 0);
 }
 
 TimeStretcher::~TimeStretcher() = default;
