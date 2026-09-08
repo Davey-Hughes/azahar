@@ -233,6 +233,41 @@ TEST_CASE("PeriodSplicer::Insert in silence inserts silence", "[audio_core][bypa
     REQUIRE(r.spliced != kCallback - AudioCore::PeriodSplicer::kJoinFrames);
 }
 
+TEST_CASE("PeriodSplicer::JoinFlush finds the exact continuation in an overlapping tail",
+          "[audio_core][bypass]") {
+    // First stream: noise[0, 3000). Second: noise[2000, 6000), overlapping it by 1000. The
+    // join must drop exactly the 1000 duplicated frames and leave the source continuous.
+    const auto noise = Noise(6000, 11);
+    std::vector<s16> stash_frames(noise.begin(), noise.begin() + (3000 * 2));
+    stash_frames.insert(stash_frames.end(), noise.begin() + (2000 * 2), noise.end());
+    auto stash = Filled(stash_frames);
+    AudioCore::PeriodSplicer splicer;
+    const std::size_t joined = splicer.JoinFlush(stash, 3000);
+    REQUIRE(joined == 1000);
+    REQUIRE(stash.Size() == 6000);
+    std::vector<s16> got(stash.Data(), stash.Data() + (6000 * 2));
+    REQUIRE(MaxDiff(got, noise, 6000) <= 1);
+}
+
+TEST_CASE("PeriodSplicer::JoinFlush declines when nothing continues the first stream",
+          "[audio_core][bypass]") {
+    const auto first = Noise(3000, 12);
+    const auto other = Noise(4000, 13);
+    std::vector<s16> stash_frames(first);
+    stash_frames.insert(stash_frames.end(), other.begin(), other.end());
+    auto stash = Filled(stash_frames);
+    AudioCore::PeriodSplicer splicer;
+    REQUIRE(splicer.JoinFlush(stash, 3000) == 0);
+    REQUIRE(stash.Size() == 7000);
+
+    // A first stream ending in silence has nothing to match either.
+    std::vector<s16> quiet(first);
+    std::fill(quiet.end() - (200 * 2), quiet.end(), 0);
+    quiet.insert(quiet.end(), first.begin(), first.end());
+    auto silent = Filled(quiet);
+    REQUIRE(splicer.JoinFlush(silent, 3000) == 0);
+}
+
 TEST_CASE("PeriodSplicer::Insert on noise repeats a period that fits the join",
           "[audio_core][bypass]") {
     const auto noise = Noise(4000, 7);

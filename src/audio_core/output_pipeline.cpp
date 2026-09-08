@@ -71,6 +71,7 @@ void OutputPipeline::Reset() {
     warm_raw_pos = 0;
     warm_lag = 0;
     flush_left = 0;
+    flush_tail = 0;
     trim_credit = 0;
     speed_entries = 0;
     time_stretcher.SetRatio(1.0);
@@ -353,11 +354,30 @@ std::size_t OutputPipeline::RenderBypass(s16* out, std::size_t num_frames, Rende
         // the first trim, and the low-water window is stale until it has seen this depth.
         if (flush_left <= num_frames + PeriodSplicer::kJoinFrames) {
             stash.PullFrom(fifo, FrameStash::kCapacity);
-            stats.join_at = flush_left;
-            stats.joined = splicer.JoinFlush(stash, flush_left);
-            if (stats.joined == 0) {
-                // Too little on one side to match, or a flush that ended in silence: the seam
-                // stays where it is, under a fade centered on it.
+            // The fed tail after the flush holds a copy of the flush's last frames, so the
+            // join finds where the raw stream continues them, exactly. When the flush ends
+            // on a WSOLA blend that matches nothing, retreat past it a join at a time.
+            std::size_t boundary = flush_left;
+            for (std::size_t back = 0; back <= kJoinRetreat && stats.joined == 0;
+                 back += PeriodSplicer::kJoinFrames) {
+                if (flush_left < back + PeriodSplicer::kJoinFrames) {
+                    break;
+                }
+                boundary = flush_left - back;
+                stats.joined = splicer.JoinFlush(stash, boundary);
+            }
+            stats.join_matched = stats.joined > 0;
+            stats.join_at = stats.join_matched ? boundary : flush_left;
+            if (!stats.join_matched) {
+                // Silence, antiphase stereo, or too little on one side: the tail's copy of
+                // what the flush played is dropped by the flush's estimated shortfall, and
+                // the seam stays where it is, under a fade centered on it, the estimate's
+                // error under a seek window.
+                const std::size_t copied = flush_tail > time_stretcher.LastFlushShortfall()
+                                               ? flush_tail - time_stretcher.LastFlushShortfall()
+                                               : 0;
+                stats.joined = std::min(copied, stash.Size() - std::min(stash.Size(), flush_left));
+                stash.Erase(flush_left, stats.joined);
                 const std::size_t half = kSeamFadeFrames / 2;
                 ArmSeamFade(flush_left > half ? flush_left - half : 0);
             }
@@ -365,13 +385,15 @@ std::size_t OutputPipeline::RenderBypass(s16* out, std::size_t num_frames, Rende
         }
     } else {
         const std::size_t excess = Excess(num_frames);
-        trim_credit = std::min<std::size_t>(
-            trim_credit + static_cast<std::size_t>(kTrimRate * static_cast<double>(num_frames)),
-            PeriodSplicer::kMaxPeriod);
-        budget = std::min(excess > kTrimSlack ? excess - kTrimSlack : 0, trim_credit);
+        trim_credit = std::min<s64>(
+            trim_credit + static_cast<s64>(kTrimRate * static_cast<double>(num_frames)),
+            2 * static_cast<s64>(PeriodSplicer::kMinPeriod));
+        if (trim_credit >= static_cast<s64>(PeriodSplicer::kMinPeriod)) {
+            budget = excess > kTrimSlack ? excess - kTrimSlack : 0;
+        }
     }
     const auto r = splicer.Cut(out, num_frames, stash, budget);
-    trim_credit -= std::min(trim_credit, r.spliced);
+    trim_credit -= static_cast<s64>(r.spliced);
     if (flush_left > 0) {
         flush_left -= std::min(flush_left, r.consumed);
     }
@@ -446,6 +468,7 @@ void OutputPipeline::Engage() {
     // Whatever flushed frames were still playing out went into the stretcher with the rest
     // of the stash; there is no seam left to close in Bypass.
     flush_left = 0;
+    flush_tail = 0;
     trim_credit = 0;
     // The stash is ahead of the history and belongs to the stretcher next; the raw path plays
     // on from it meanwhile.
@@ -481,6 +504,12 @@ void OutputPipeline::Handover(RenderStats& stats) {
     stats.flushed = stash.Append(flush_scratch.data(), got);
     // The flush continues the stretcher's output exactly; the seam comes when it runs out.
     flush_left = stats.flushed;
+    // After it, the last frames the stretcher was fed, which the flush falls short of and
+    // the FIFO's next frame follows: the join at the seam finds where in them the flush's
+    // last frames recur, and drops the copy, so the raw stream continues the flush exactly.
+    const std::size_t tail_room = std::min(stash.Room(), flush_scratch.size() / 2);
+    flush_tail = stash.Append(flush_scratch.data(),
+                              time_stretcher.CopyFedTail(flush_scratch.data(), tail_room));
     prefilling = false;
     trim_credit = 0;
     LOG_DEBUG(Audio, "stretcher handed over {} frames", stats.flushed);
@@ -551,6 +580,9 @@ void OutputPipeline::ApplySeamFade(s16* buffer, std::size_t num_frames) {
         fade_delay -= num_frames;
         fade_last_out[0] = buffer[((num_frames - 1) * 2) + 0] / 32768.0f;
         fade_last_out[1] = buffer[((num_frames - 1) * 2) + 1] / 32768.0f;
+        // A delay that ends exactly here starts the fade at the next callback's first
+        // frame, from this level, not the one armed with.
+        fade_out_from = fade_last_out;
         return;
     }
     const std::size_t start = fade_delay;

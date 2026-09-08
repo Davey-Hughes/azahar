@@ -194,6 +194,26 @@ TEST_CASE("TimeStretcher::FlushInto keeps the audio's own trailing silence",
     REQUIRE(heard + kept >= 5000 - silent.SeekFrames() - silent.OverlapFrames() - 16);
 }
 
+TEST_CASE("TimeStretcher::CopyFedTail holds the last frames fed, not the flush's padding",
+          "[audio_core][bypass]") {
+    AudioCore::TimeStretcher ts;
+    ts.SetRatioBounds(1.0, 1.0);
+    const auto in = Tone(0, 6000);
+    std::vector<s16> out(kCallback * 2);
+    ts.Process(in.data(), 6000, out.data(), kCallback);
+    std::vector<s16> flushed(12288 * 2);
+    ts.FlushInto(flushed.data(), 12288);
+    std::vector<s16> tail(AudioCore::TimeStretcher::kFedTailFrames * 2);
+    const std::size_t got = ts.CopyFedTail(tail.data(), AudioCore::TimeStretcher::kFedTailFrames);
+    REQUIRE(got == AudioCore::TimeStretcher::kFedTailFrames);
+    const std::size_t from = 6000 - got;
+    for (std::size_t i = 0; i < got * 2; i++) {
+        REQUIRE(tail[i] == in[(from * 2) + i]);
+    }
+    ts.Clear();
+    REQUIRE(ts.CopyFedTail(tail.data(), 16) == 0);
+}
+
 TEST_CASE("TimeStretcher::SetTargetBacklog steers the ratio toward the target",
           "[audio_core][bypass]") {
     AudioCore::TimeStretcher wants_more;

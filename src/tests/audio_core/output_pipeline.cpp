@@ -37,6 +37,8 @@ constexpr long kSeamBound = 900;
 /// jitter plus the error every tempo step leaves behind, ~810 frames after a fast-forward
 /// release. The join drops whatever it drops on top of that.
 constexpr long kFlushBound = 1300;
+/// A matched join continues the source exactly; a frame or two of rounding at the blend.
+constexpr long kJoinExact = 8;
 
 /// Source frame i: a hash of its index on both channels.
 s16 Src(std::size_t i) {
@@ -241,7 +243,7 @@ void CheckTimeline(const Run& run, const SourceIndex& index, std::size_t first_c
     std::size_t skip_until = 0;
     bool in_flush = false;
     std::optional<std::size_t> flush_end; // output frame where the flushed run ends
-    std::size_t flush_joined = 0;         // what the join dropped there, 0 for a fade
+    bool flush_matched = false;           // whether the join matched there, else a fade
     bool flush_seam_seen = false;
     std::size_t last_join = 0;
     for (std::size_t c = first_callback; c < run.callbacks.size(); c++) {
@@ -264,7 +266,7 @@ void CheckTimeline(const Run& run, const SourceIndex& index, std::size_t first_c
         }
         if (cb.stats.join_at > 0) {
             flush_end = (c * kCallback) + cb.stats.join_at;
-            flush_joined = cb.stats.joined;
+            flush_matched = cb.stats.join_matched;
             last_join = c;
         }
         const bool raw = cb.mode == Mode::Bypass || cb.mode == Mode::Warming;
@@ -287,20 +289,26 @@ void CheckTimeline(const Run& run, const SourceIndex& index, std::size_t first_c
             if (last_j) {
                 const long gap = static_cast<long>(j - *last_j);
                 const long jump = static_cast<long>(*p) - static_cast<long>(*last_p) - gap;
-                // The blend's last few frames are within a bit of their target and locate, so
-                // the jump shows anywhere from inside the blend's tail on; the frame before it
-                // must precede the blend.
-                const bool across_flush_end = in_flush && flush_end &&
-                                              *last_j + PeriodSplicer::kJoinFrames < *flush_end &&
-                                              j + PeriodSplicer::kJoinFrames > *flush_end;
+                // The join's blend is the kJoinFrames before the recorded end. A matched join
+                // is exact and locates straight through it; a declined one lies under the
+                // fade, and the jump shows where the located frames resume.
+                const std::size_t blend_start = flush_end && *flush_end > PeriodSplicer::kJoinFrames
+                                                    ? *flush_end - PeriodSplicer::kJoinFrames
+                                                    : 0;
+                const bool across_flush_end =
+                    in_flush && flush_end && *last_j < blend_start && j >= blend_start;
                 INFO("callback " << c << " at " << Run::TimeOf(c) << " s, frame " << j << ", jump "
                                  << jump << ", gap " << gap);
                 if (seam) {
                     REQUIRE(std::abs(jump) <= kSeamBound);
                     seam = false;
                 } else if (across_flush_end) {
-                    REQUIRE(std::abs(jump - static_cast<long>(flush_joined)) <= kFlushBound);
-                    REQUIRE(gap >= static_cast<long>(PeriodSplicer::kJoinFrames) - 16);
+                    if (flush_matched) {
+                        REQUIRE(std::abs(jump) <= kJoinExact);
+                    } else {
+                        REQUIRE(std::abs(jump) <= kFlushBound);
+                        REQUIRE(gap >= static_cast<long>(PeriodSplicer::kJoinFrames) - 16);
+                    }
                     flush_seam_seen = true;
                     in_flush = false;
                 } else if (raw && in_flush) {
@@ -325,8 +333,8 @@ void CheckTimeline(const Run& run, const SourceIndex& index, std::size_t first_c
         if (raw && !in_flush && c >= skip_until) {
             const bool spliced = cb.stats.cut > 0 || cb.stats.inserted > 0 || cb.stats.join_at > 0;
             // A join's blend can straddle into the callback after it, on top of a cut there;
-            // and a join can decline (on noise, the reference can lie in a WSOLA blend that
-            // matches nothing), leaving the seam fade's frames unlocated in its callback.
+            // and a join can decline (a flush ending in silence), leaving the seam fade's
+            // frames unlocated in its callback.
             const bool wide = cb.stats.edge != Edge::None ||
                               (last_join > 0 && (c == last_join || c == last_join + 1));
             const double threshold = wide ? 0.40 : spliced ? 0.65 : 0.95;

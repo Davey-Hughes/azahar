@@ -9,6 +9,7 @@
 #include <limits>
 #include <memory>
 #include <vector>
+#include "audio_core/frame_buffers.h"
 #include "common/common_types.h"
 
 namespace soundtouch {
@@ -72,6 +73,17 @@ public:
     /// How much a flush can fall short of what is inside: one seek window, which the last
     /// round starts anywhere within, plus one overlap, which it blends into the padding.
     std::size_t FlushShortfall() const;
+    /// What the last FlushInto() fell short by, as estimated: the frames its estimate of the
+    /// content exceeded what it kept. The estimate itself runs up to a seek window long, so
+    /// this is an upper bound on the audio the flush missed.
+    std::size_t LastFlushShortfall() const {
+        return last_flush_short;
+    }
+    /// Copies the last kFedTailFrames frames fed, oldest first, into `out`: more than the
+    /// flush falls short of, so a handover's join can find where the raw stream continues
+    /// the flush exactly, on any material. Returns the frames copied, at most `max_frames`.
+    std::size_t CopyFedTail(s16* out, std::size_t max_frames) const;
+    static constexpr std::size_t kFedTailFrames = 2048;
     /// One overlap, and one seek window, at the current settings, in frames.
     std::size_t OverlapFrames() const;
     std::size_t SeekFrames() const;
@@ -93,6 +105,8 @@ private:
     double max_ratio = std::numeric_limits<double>::infinity();
     std::array<s16, kDiscardChunkFrames * 2> discard_scratch{};
     std::vector<float> put_scratch; // the float build's input, converted; grows once
+    FrameHistory fed;               // the last frames fed, for CopyFedTail()
+    std::size_t last_flush_short = 0;
 };
 
 } // namespace AudioCore

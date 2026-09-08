@@ -122,18 +122,21 @@ public:
         return {num_frames, num_frames - p, p};
     }
 
-    /// The stash holds `boundary` frames of one stream and then a second that should continue
-    /// it but does not quite: a stretcher's flush is off by its last round's seek jitter and by
-    /// every tempo step it took with input resident. Finds where the second stream best
-    /// continues the first's last kCorrFrames, cross-fades the first's last kJoinFrames into
-    /// the frames before that point, and drops what lies between, so the join is phase
-    /// continuous. At least kCorrFrames are dropped, since the match is scored on the frames
-    /// before the candidate, which must lie in the second stream. Returns the frames dropped;
-    /// 0, with the stash untouched, when either side is too short to search, when the first
-    /// stream ends in silence (scored on the channel sum, so antiphase stereo counts) and any
-    /// junction will do, or when nothing within reach continues it: a rest straddling the
-    /// boundary makes every candidate past it score like a chance match, and taking the
-    /// best of those would delete the rest, where a fade across it is right.
+    /// The stash holds `boundary` frames of one stream and then a second that overlaps its
+    /// end: a stretcher's flush falls short of what it was fed, and the second stream starts
+    /// with the last frames fed, so the flush's last kCorrFrames recur in it, a copy on any
+    /// material within a seek window and an overlap of its start. Finds where they recur,
+    /// scored against every point within kJoinSearch and the earliest best taken (on periodic
+    /// material a period earlier scores the same, which repeats one period, unheard),
+    /// cross-fades the first's last kJoinFrames into the frames before that point, and drops
+    /// what lies between, so the second stream continues the first exactly. At least
+    /// kCorrFrames are dropped, since the match is scored on the frames before the candidate,
+    /// which must lie in the second stream. Returns the frames dropped; 0, with the stash
+    /// untouched, when either side is too short to search, when the first stream ends in
+    /// silence (scored on the channel sum, so antiphase stereo counts) and any junction will
+    /// do, or when nothing within reach continues it, as when the first stream's end is a
+    /// WSOLA blend of two segments that the second holds only one of; the caller then steps
+    /// the boundary back past the blend, or fades across the seam.
     std::size_t JoinFlush(FrameStash& stash, std::size_t boundary) {
         const std::size_t avail = stash.Size();
         if (boundary < kJoinFrames || avail < boundary + kCorrFrames + kMinPeriod) {

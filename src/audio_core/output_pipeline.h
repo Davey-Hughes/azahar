@@ -43,9 +43,14 @@ public:
     // cycle to cycle, and trimming to the exact target would chase it with a lone cut every
     // couple of seconds.
     static constexpr std::size_t kTrimSlack = 128;
-    /// The most Bypass trims per callback, as a fraction of it: the excess a handover brings
-    /// goes at a tenth of real time, what the drain ran at, rather than in a burst of cuts.
+    /// The most Bypass trims per callback on average, as a fraction of it: the excess a
+    /// handover brings goes at a tenth of real time, what the drain ran at, rather than in
+    /// a burst of cuts. A gate on cutting, not a bound on the cut: each cut is still a whole
+    /// period of the material, and puts the credit into debt until the rate has paid for it.
     static constexpr double kTrimRate = 0.1;
+    /// How far back from the flush's end the join may retreat, a join at a time, when the
+    /// end is a WSOLA blend that matches nothing: past one overlap and the reference.
+    static constexpr std::size_t kJoinRetreat = 512;
 
     /// What the last Render() did, for tests and the edge log.
     struct RenderStats {
@@ -54,7 +59,10 @@ public:
         std::size_t cut = 0;      // frames the splicer removed
         std::size_t inserted = 0; // frames the splicer repeated
         std::size_t flushed = 0;  // frames the stretcher handed to the stash at Handover
-        std::size_t joined = 0;   // frames dropped where the flushed frames met the FIFO's
+        std::size_t joined = 0;   // frames dropped where the flushed frames met the FIFO's:
+                                  // the fed tail's copy of what the flush played, exactly
+                                  // when join_matched, else as estimated under a fade
+        bool join_matched = false;
         std::size_t join_at = 0;  // where the flushed run ended, in output frames from the
                                   // start of this callback (it can lie in the next); 0 for
                                   // none. The join's blend is the kJoinFrames before it
@@ -101,11 +109,12 @@ public:
     /// audio plus one callback. One burst is what a late burst costs, the second is the slack
     /// a slowdown is detected within.
     std::size_t FillTarget(std::size_t num_frames) const;
-    /// What the flush must put in the stash for Drain to hand over: at least the prefill
-    /// target, so the beat's trough stays above the engage depth, and at most one output
-    /// batch over it, the excess the trim removes at kTrimRate within about a second. The
-    /// content falls a tenth of a callback per callback in Drain, so the upper bound is
-    /// crossed on the way down and is where the handover lands.
+    /// What the flush must put in the stash for Drain to hand over, at the least it can: at
+    /// least the prefill target, so the beat's trough stays above the engage depth, and at
+    /// most one output batch over it. The content falls a tenth of a callback per callback
+    /// in Drain, so the upper bound is crossed on the way down and is where the handover
+    /// lands; the join then restores what the flush fell short of, so the excess the trim
+    /// removes at kTrimRate is one batch plus up to that shortfall, about a second's worth.
     std::size_t HandoverLow(std::size_t num_frames) const;
     std::size_t HandoverHigh(std::size_t num_frames) const;
     /// Below this depth Bypass engages the stretcher: one callback plus half a burst, so an
@@ -149,7 +158,9 @@ private:
     void DiscardPending();
     std::size_t WarmDiscardNeeded() const;
     std::size_t Excess(std::size_t num_frames) const;
-    /// What a flush now would put in the stash; what the handover band is judged on.
+    /// The least a flush now would put in the stash, what the handover band is judged on:
+    /// the content less what a flush can fall short of. A matched join gets the shortfall
+    /// back from the fed tail.
     std::size_t FlushYield() const;
     /// Arms the fade to begin `offset` frames into the output that follows, from the level
     /// just before it; at 0, from the last frame handed on.
@@ -163,7 +174,8 @@ private:
     static constexpr std::size_t kSpeedWindowFrames = 327680;
     // Callbacks the ring holds. A ring full of real entries counts as settled too, so a
     // sink with callbacks under kSpeedWindowFrames / kSpeedWindowMax frames (80) still
-    // reaches Drain, on a shorter window.
+    // reaches Drain, on a shorter window; under about 67 that window is too short to hold
+    // the band steady against the beat, and no shipped sink asks for so little.
     static constexpr std::size_t kSpeedWindowMax = 4096;
     static constexpr std::size_t kSpeedWindowSettle = 32768; // frames before it is trusted
     static constexpr double kStretchTargetBacklog = 0.125;   // seconds, master's servo target
@@ -216,14 +228,16 @@ private:
     // would trigger cuts at the right average depth. Each cut lowers every entry by what it
     // removed, so the minimum stays what the trough would be now rather than what it was.
     std::array<std::size_t, kLowWaterWindow> depth_window{};
-    // What the trim may cut now: grows by kTrimRate of each Bypass callback, up to one
-    // period, and each cut spends it. Audio thread only.
-    std::size_t trim_credit = 0;
+    // Whether the trim may cut now: grows by kTrimRate of each Bypass callback, up to two
+    // minimum periods so a stale window cannot prepay a burst, and each cut is charged in
+    // full, into debt for a long period. Audio thread only.
+    s64 trim_credit = 0;
     std::size_t window_pos = 0;
     // Flushed frames still at the front of the stash after a Handover. They continue the
     // stretcher's output exactly; the seam is where they run out and the FIFO's frames take
     // over, off by the flush's count error, and PeriodSplicer::JoinFlush() closes it there.
     std::size_t flush_left = 0;
+    std::size_t flush_tail = 0; // fed-tail frames appended after the flush at Handover
     // Warm-up: source frames the raw path consumed since Engage, and how far the stretcher's
     // next output frame sits behind the frame the history ended on (history fed minus output
     // dropped at priming).

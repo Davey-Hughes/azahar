@@ -62,6 +62,7 @@ std::size_t TimeStretcher::Put(const s16* in, std::size_t num_in) {
         sound_touch->putSamples(reinterpret_cast<const soundtouch::SAMPLETYPE*>(in),
                                 static_cast<u32>(num_in));
     }
+    fed.Record(in, num_in);
     return num_in;
 }
 
@@ -130,6 +131,7 @@ std::size_t TimeStretcher::Process(const s16* in, std::size_t num_in, s16* out,
 
 void TimeStretcher::Clear() {
     sound_touch->clear();
+    fed.Clear();
 }
 
 void TimeStretcher::SetTargetBacklog(double seconds) {
@@ -155,6 +157,7 @@ std::size_t TimeStretcher::OutputBatchFrames() const {
 std::size_t TimeStretcher::BeginPrime() {
     stretch_ratio = 1.0;
     sound_touch->setTempo(1.0);
+    fed.Clear();
     // Sixteen over the latency: RateTransposer keeps one input frame back for its
     // interpolation, so exactly the latency leaves TDStretch one short of a round.
     return static_cast<std::size_t>(std::max(0, sound_touch->getSetting(SETTING_INITIAL_LATENCY))) +
@@ -195,12 +198,13 @@ std::size_t TimeStretcher::FlushInto(s16* out, std::size_t max_frames) {
         static_cast<std::size_t>(static_cast<double>(residency) / stretch_ratio);
     const std::size_t want = std::min(expected + seek + overlap, max_frames);
 
-    // Bounded, for a stretcher that cannot make another round however much it is fed.
+    // Bounded, for a stretcher that cannot make another round however much it is fed. Put
+    // directly: the padding is not audio and must not be recorded as fed.
     static constexpr std::size_t kPadFrames = 128;
-    static constexpr std::array<s16, kPadFrames * 2> zeros{};
-    for (std::size_t fed = 0; sound_touch->numSamples() < want && fed < (2 * want) + 8192;
-         fed += kPadFrames) {
-        Put(zeros.data(), kPadFrames);
+    static constexpr std::array<soundtouch::SAMPLETYPE, kPadFrames * 2> zeros{};
+    for (std::size_t padded = 0; sound_touch->numSamples() < want && padded < (2 * want) + 8192;
+         padded += kPadFrames) {
+        sound_touch->putSamples(zeros.data(), static_cast<u32>(kPadFrames));
     }
 
     std::size_t got = 0;
@@ -218,10 +222,12 @@ std::size_t TimeStretcher::FlushInto(s16* out, std::size_t max_frames) {
     sound_touch->clear();
 
     // Trim the silence the padding made, then the overlap blended into it. Only zeros the
-    // padding could have made: the residency counts the last round's overlap and offset,
-    // which are already out, so the audio cannot end before `expected` less an overlap and
-    // a seek window, and a run of zeros reaching that floor is the audio's own silence,
-    // kept in full. A game silent on a load screen buffers time in that silence, and a
+    // padding could have made: the residency counts the last round's offset, which the
+    // round before already played, so the audio ends at or before `expected`, and the last
+    // round starts anywhere within a seek window of its nominal place, so it cannot end
+    // before `expected` less one; the overlap on top is slack (measured: never below
+    // `expected` less 294). A run of zeros reaching that floor is the audio's own silence,
+    // kept in full: a game silent on a load screen buffers time in that silence, and a
     // flush that dropped it would hand Bypass an empty stash, which re-engages on the next
     // callback.
     const std::size_t floor = expected > seek + overlap ? expected - seek - overlap : 0;
@@ -232,7 +238,12 @@ std::size_t TimeStretcher::FlushInto(s16* out, std::size_t max_frames) {
     if (end < got && end > floor) {
         end = end > overlap ? end - overlap : 0;
     }
+    last_flush_short = expected > end ? expected - end : 0;
     return end;
+}
+
+std::size_t TimeStretcher::CopyFedTail(s16* out, std::size_t max_frames) const {
+    return fed.Last(std::min(max_frames, kFedTailFrames), out);
 }
 
 std::size_t TimeStretcher::OverlapFrames() const {
