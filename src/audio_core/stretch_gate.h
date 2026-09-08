@@ -26,8 +26,10 @@ public:
     enum class Edge { None, Engage, Sync, Abort, Handover };
 
     struct Input {
-        double speed;           // smoothed arrival / requested
+        double speed;           // arrival / requested over the last two seconds
+        double speed_fast;      // the same over ~0.3 s: quicker, but it dips on burst gaps
         std::size_t buffered;   // fifo + stash, frames, at the start of the callback
+        std::size_t low_water;  // Bypass engages below this depth, once prefilled
         std::size_t backlog;    // stretcher output backlog, frames
         double ratio;           // stretcher ratio
         bool enabled;           // enable_audio_stretching
@@ -39,15 +41,18 @@ public:
 
     static constexpr double kEngageLow = 0.95;
     static constexpr double kEngageHigh = 1.05;
+    /// The fast estimate sees a burst gap as a dip to ~0.95, so it engages only well below.
+    static constexpr double kEngageFast = 0.90;
     static constexpr double kDisengageBand = 0.01;
     static constexpr double kRatioBand = 0.03;
     static constexpr double kDrainMinRatio = 1.0;
     static constexpr double kDrainMaxRatio = 1.1;
     /// Two seconds of callbacks at 32728 Hz.
     static constexpr std::size_t kDwellFrames = 65456;
-    /// Half a second: about two stretcher rounds at the slowest speed a one-period-per-callback
-    /// warm-up can outrun. Past it the switch is forced and plays a short replay instead.
-    static constexpr std::size_t kWarmTimeoutFrames = 16364;
+    /// One second: room for the stretcher to build a round of reserve at the slowest speed a
+    /// one-period-per-callback warm-up can outrun. Past it the switch is forced and plays a
+    /// short replay instead.
+    static constexpr std::size_t kWarmTimeoutFrames = 32728;
 
     Edge Update(const Input& in) {
         if (in.silenced) {
@@ -58,8 +63,8 @@ public:
             if (!in.enabled) {
                 return Edge::None;
             }
-            if (in.speed < kEngageLow || in.speed > kEngageHigh ||
-                (!in.prefilling && in.buffered < in.num_frames)) {
+            if (in.speed_fast < kEngageFast || in.speed < kEngageLow || in.speed > kEngageHigh ||
+                (!in.prefilling && in.buffered < in.low_water)) {
                 mode = Mode::Warming;
                 warm_frames = 0;
                 return Edge::Engage;

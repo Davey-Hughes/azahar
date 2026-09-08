@@ -59,6 +59,10 @@ void OutputPipeline::Reset() {
     EnterStretch();
     gate.Reset();
     speed = 1.0;
+    speed_fast = 1.0;
+    arrivals.fill(0);
+    requests.fill(0);
+    speed_pos = 0;
     fifo_left = 0;
     prefilling = true;
     depth_window.fill(0);
@@ -82,6 +86,14 @@ std::size_t OutputPipeline::Push(const void* frames, std::size_t num_frames) {
 
 void OutputPipeline::SetStretching(bool enable) {
     enable_stretching = enable;
+}
+
+void OutputPipeline::SetRequestedSpeed(double speed) {
+    requested_speed.store(speed, std::memory_order_relaxed);
+}
+
+double OutputPipeline::ServoSeed() const {
+    return std::min(speed_fast, requested_speed.load(std::memory_order_relaxed));
 }
 
 void OutputPipeline::SetRamp(bool enable) {
@@ -121,7 +133,15 @@ void OutputPipeline::JumpEnd(bool ramped) {
 }
 
 std::size_t OutputPipeline::FillTarget(std::size_t num_frames) const {
-    return static_cast<std::size_t>(native_sample_rate / 60) + num_frames;
+    return (kFillBursts * static_cast<std::size_t>(native_sample_rate / 60)) + num_frames;
+}
+
+std::size_t OutputPipeline::EngageDepth(std::size_t num_frames) const {
+    return num_frames + (static_cast<std::size_t>(native_sample_rate / 60) / 2);
+}
+
+std::size_t OutputPipeline::PrefillTarget(std::size_t num_frames) const {
+    return FillTarget(num_frames) + num_frames;
 }
 
 void OutputPipeline::Render(s16* out, std::size_t num_frames) {
@@ -144,22 +164,44 @@ void OutputPipeline::RenderChunk(s16* out, std::size_t num_frames) {
         // it plays again.
         prefilling = true;
     } else {
-        // Frames that arrived since the last callback, over the frames asked for, smoothed
-        // over kSpeedTimeConstant. Arrivals come a video frame at a time, so a single reading
-        // is 0 or 2 as often as 1; the smoothing is what makes it a speed.
-        const double arrived =
-            fifo_now >= fifo_left ? static_cast<double>(fifo_now - fifo_left) : 0.0;
+        // Frames that arrived since the last callback, over the frames asked for. Arrivals
+        // come a video frame at a time, so a single reading is 0 or 2 as often as 1: the fast
+        // estimate smooths that over kSpeedTimeConstant and still dips on every burst gap;
+        // the slow one is a ratio of sums over kSpeedWindowFrames, and reads 1.0 until it
+        // holds enough to be within a couple of percent.
+        const std::size_t arrived = fifo_now >= fifo_left ? fifo_now - fifo_left : 0;
         const double alpha = std::min(1.0, static_cast<double>(num_frames) /
                                                (kSpeedTimeConstant * native_sample_rate));
-        speed += ((arrived / static_cast<double>(num_frames)) - speed) * alpha;
+        speed_fast +=
+            ((static_cast<double>(arrived) / static_cast<double>(num_frames)) - speed_fast) * alpha;
+        const std::size_t window =
+            std::clamp<std::size_t>(kSpeedWindowFrames / num_frames, 4, kSpeedWindowMax);
+        arrivals[speed_pos] = arrived;
+        requests[speed_pos] = num_frames;
+        speed_pos = (speed_pos + 1) % window;
+        std::size_t arrival_sum = 0;
+        std::size_t request_sum = 0;
+        for (std::size_t i = 0; i < window; i++) {
+            arrival_sum += arrivals[i];
+            request_sum += requests[i];
+        }
+        speed = request_sum >= kSpeedWindowSettle
+                    ? static_cast<double>(arrival_sum) / static_cast<double>(request_sum)
+                    : 1.0;
     }
 
     const StretchGate::Mode before = gate.CurrentMode();
+    // Sync needs a round of output in reserve past the discard, or the stretcher runs dry
+    // waiting for its next round while the servo is still finding the tempo.
     const bool synced = before == StretchGate::Mode::Warming &&
-                        time_stretcher.OutputBacklog() >= WarmDiscardNeeded() + num_frames;
+                        time_stretcher.OutputBacklog() >= WarmDiscardNeeded() + num_frames +
+                                                              time_stretcher.OutputBatchFrames() +
+                                                              num_frames;
     const StretchGate::Edge edge = gate.Update({
         .speed = speed,
+        .speed_fast = speed_fast,
         .buffered = depth,
+        .low_water = EngageDepth(num_frames),
         .backlog = time_stretcher.OutputBacklog(),
         .ratio = time_stretcher.Ratio(),
         .enabled = enable_stretching.load(),
@@ -195,8 +237,11 @@ void OutputPipeline::RenderChunk(s16* out, std::size_t num_frames) {
         EnterStretch();
     }
     if (mode != before) {
-        LOG_DEBUG(Audio, "{} -> {}: speed {:.3f}, {} frames buffered, {} in the stretcher",
-                  ModeName(before), ModeName(mode), speed, depth, time_stretcher.OutputBacklog());
+        LOG_DEBUG(Audio,
+                  "{} -> {}: speed {:.3f} ({:.3f} fast), {} frames buffered, {} in the "
+                  "stretcher, excess {}",
+                  ModeName(before), ModeName(mode), speed, speed_fast, depth,
+                  time_stretcher.OutputBacklog(), Excess(num_frames));
     }
 
     std::size_t written = 0;
@@ -260,14 +305,16 @@ void OutputPipeline::RenderChunk(s16* out, std::size_t num_frames) {
 std::size_t OutputPipeline::RenderBypass(s16* out, std::size_t num_frames, RenderStats& stats) {
     stash.PullFrom(fifo, num_frames + PeriodSplicer::kMaxPeriod);
     if (prefilling) {
-        if (stats.depth < FillTarget(num_frames)) {
+        if (stats.depth < PrefillTarget(num_frames)) {
             return 0;
         }
         prefilling = false;
     }
     depth_window[window_pos] = stats.depth;
     cut_window[window_pos] = 0;
-    const auto r = splicer.Cut(out, num_frames, stash, Excess(num_frames));
+    const std::size_t excess = Excess(num_frames);
+    const auto r =
+        splicer.Cut(out, num_frames, stash, excess > kTrimSlack ? excess - kTrimSlack : 0);
     cut_window[window_pos] = r.spliced;
     window_pos = (window_pos + 1) % kLowWaterWindow;
     history.Record(out, r.written);
@@ -294,6 +341,15 @@ std::size_t OutputPipeline::RenderWarming(s16* out, std::size_t num_frames, Rend
 }
 
 std::size_t OutputPipeline::RenderStretch(s16* out, std::size_t num_frames) {
+    // A step in the host's speed, fast-forward pressed or released, moves faster than the
+    // servo's low-pass follows; reseed it when they part company. The request caps the seed,
+    // so a release lands the tempo at once rather than a quarter second later, when the fast
+    // estimate has caught up and the backlog is long gone.
+    const double seed = ServoSeed();
+    const double ratio = time_stretcher.Ratio();
+    if (ratio > seed * (1.0 + kServoResyncBand) || ratio < seed * (1.0 - kServoResyncBand)) {
+        time_stretcher.SetRatio(seed);
+    }
     // The whole FIFO every callback, as master did; the stash is empty in these modes.
     const std::size_t pulled = fifo.Pop(pop_scratch.data(), kMaxCallbackFrames);
     return time_stretcher.Process(pop_scratch.data(), pulled, out, num_frames);
@@ -332,6 +388,9 @@ void OutputPipeline::Sync(RenderStats& stats) {
     const std::size_t discard = std::min(needed, time_stretcher.OutputBacklog());
     time_stretcher.Discard(discard);
     stats.replayed = needed - discard;
+    // Start the servo at the speed the host is actually running, not at 1.0: its low-pass
+    // takes most of a second to get there on its own, and the reserve would be gone first.
+    time_stretcher.SetRatio(ServoSeed());
     // The stash's frames are inside the stretcher now.
     stash.Clear();
     ArmHandoverFade();
@@ -374,8 +433,8 @@ std::size_t OutputPipeline::Excess(std::size_t num_frames) const {
         low_water = std::min(low_water, depth_window[i]);
         cuts += cut_window[i];
     }
-    const std::size_t floor = FillTarget(num_frames) + cuts;
-    return low_water > floor ? low_water - floor : 0;
+    const std::size_t fill_floor = FillTarget(num_frames) + cuts;
+    return low_water > fill_floor ? low_water - fill_floor : 0;
 }
 
 void OutputPipeline::ArmHandoverFade() {

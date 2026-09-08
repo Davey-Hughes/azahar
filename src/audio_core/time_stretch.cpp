@@ -136,6 +136,16 @@ void TimeStretcher::SetRatioBounds(double lo, double hi) {
     stretch_ratio = std::clamp(stretch_ratio, min_ratio, max_ratio);
 }
 
+void TimeStretcher::SetRatio(double ratio) {
+    stretch_ratio = std::clamp(ratio, min_ratio, max_ratio);
+    sound_touch->setTempo(stretch_ratio);
+}
+
+std::size_t TimeStretcher::OutputBatchFrames() const {
+    return static_cast<std::size_t>(
+        std::max(0, sound_touch->getSetting(SETTING_NOMINAL_OUTPUT_SEQUENCE)));
+}
+
 std::size_t TimeStretcher::BeginPrime() {
     stretch_ratio = 1.0;
     sound_touch->setTempo(1.0);

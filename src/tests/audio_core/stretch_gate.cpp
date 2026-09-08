@@ -16,7 +16,9 @@ constexpr std::size_t kCallback = 512;
 StretchGate::Input In(double speed) {
     StretchGate::Input in{};
     in.speed = speed;
+    in.speed_fast = speed;
     in.buffered = 4000;
+    in.low_water = kCallback;
     in.backlog = 4000;
     in.ratio = 1.0;
     in.enabled = true;
@@ -73,6 +75,20 @@ TEST_CASE("StretchGate engages on slow, fast, or an empty buffer", "[audio_core]
         auto in = In(1.0);
         in.buffered = kCallback - 1;
         REQUIRE(gate.Update(in) == Edge::Engage);
+        REQUIRE(gate.CurrentMode() == Mode::Warming);
+    }
+    SECTION("fast estimate well below full, before the slow one moves") {
+        StretchGate gate;
+        auto in = In(1.0);
+        in.speed_fast = 0.89;
+        REQUIRE(gate.Update(in) == Edge::Engage);
+    }
+    SECTION("a burst gap's dip in the fast estimate is not a slowdown") {
+        StretchGate gate;
+        auto in = In(1.0);
+        in.speed_fast = 0.94;
+        REQUIRE(Repeat(gate, in, 100) == Edge::None);
+        REQUIRE(gate.CurrentMode() == Mode::Bypass);
     }
     SECTION("low water while prefilling is not an underrun") {
         StretchGate gate;
@@ -106,8 +122,8 @@ TEST_CASE("StretchGate syncs out of Warming when told, or on the timeout", "[aud
     SECTION("timeout") {
         StretchGate gate;
         REQUIRE(gate.Update(In(0.9)) == Edge::Engage);
-        // 16364 frames of warm-up at 512 per callback: the 32nd callback crosses it.
-        REQUIRE(Repeat(gate, In(0.9), 31) == Edge::None);
+        // 32728 frames of warm-up at 512 per callback: the 64th callback crosses it.
+        REQUIRE(Repeat(gate, In(0.9), 63) == Edge::None);
         REQUIRE(gate.CurrentMode() == Mode::Warming);
         REQUIRE(gate.Update(In(0.9)) == Edge::Sync);
         REQUIRE(gate.CurrentMode() == Mode::Stretch);

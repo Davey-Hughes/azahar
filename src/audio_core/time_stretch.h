@@ -44,6 +44,12 @@ public:
     double Ratio() const {
         return stretch_ratio;
     }
+    /// Sets the servo state outright, within the bounds: a stretcher that starts from a
+    /// measured speed rather than 1.0 keeps its backlog from the first callback.
+    void SetRatio(double ratio);
+    /// Output frames one processing round produces at the current tempo: how much output the
+    /// stretcher must hold to ride out the wait for its next round.
+    std::size_t OutputBatchFrames() const;
 
     /// Starts a priming: tempo 1.0, servo state reset. Returns the frames to Feed() from audio
     /// already played so that a first round runs inside the priming: SoundTouch's initial

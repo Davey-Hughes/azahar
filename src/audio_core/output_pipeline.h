@@ -39,6 +39,10 @@ public:
     /// The most a single Render() serves at once; a sink asking for more is served in pieces.
     /// Also the FIFO's capacity, as on master.
     static constexpr std::size_t kMaxCallbackFrames = 0x2000;
+    // Excess the splicer leaves alone. The beat's trough wanders by a few dozen frames from
+    // cycle to cycle, and trimming to the exact target would chase it with a lone cut every
+    // couple of seconds.
+    static constexpr std::size_t kTrimSlack = 128;
 
     /// What the last Render() did, for tests and the edge log.
     struct RenderStats {
@@ -66,6 +70,11 @@ public:
     void Render(s16* out, std::size_t num_frames);
 
     void SetStretching(bool enable);
+    /// The speed the frontend is asking for, from its frame limit: 1.0 at the default, the
+    /// fast-forward factor while it is held, infinity with the limiter off. A hint only, for
+    /// reseeding the servo when the request drops: the measured speed still governs, since the
+    /// host may not reach what was asked. Any thread.
+    void SetRequestedSpeed(double speed);
     void SetRamp(bool enable);
     /// The core has stopped producing audio on purpose: end the stream on a ramp rather than
     /// wherever the waveform happens to be, and discard whatever it had already produced.
@@ -80,9 +89,18 @@ public:
     bool JumpBegin();
     void JumpEnd(bool ramped);
 
-    /// Bypass's fill target: one video frame of audio plus one callback, the least that keeps
-    /// the raw path fed between the emulator's bursts.
+    /// Bypass's fill target, for the depth at its beat trough: kFillBursts video frames of
+    /// audio plus one callback. One burst is what a late burst costs, the second is the slack
+    /// a slowdown is detected within.
     std::size_t FillTarget(std::size_t num_frames) const;
+    /// Below this depth Bypass engages the stretcher: one callback plus half a burst, so an
+    /// engage on a real slowdown still has a callback in hand, while a burst arriving late at
+    /// the trough of a healthy stream stays above it.
+    std::size_t EngageDepth(std::size_t num_frames) const;
+    /// Where prefill lets Bypass start playing: the fill target plus one callback, since the
+    /// beat between bursts and callbacks brings the depth back down by a callback at its
+    /// trough, and the trough is what the fill target is for.
+    std::size_t PrefillTarget(std::size_t num_frames) const;
 
     // Audio-thread state, read between Render() calls: for tests and logging.
     StretchGate::Mode CurrentMode() const {
@@ -90,6 +108,9 @@ public:
     }
     double Speed() const {
         return speed;
+    }
+    double SpeedFast() const {
+        return speed_fast;
     }
     std::size_t Buffered() const {
         return fifo.Size() + stash.Size();
@@ -108,16 +129,29 @@ private:
     void Handover(RenderStats& stats);
     void EnterStretch();
     void EnterDrain(std::size_t num_frames);
+    /// Where the servo should sit right now: the fast estimate, capped by the request.
+    double ServoSeed() const;
     void DiscardPending();
     std::size_t WarmDiscardNeeded() const;
     std::size_t Excess(std::size_t num_frames) const;
     void ArmHandoverFade();
     void ApplyHandoverFade(s16* buffer, std::size_t num_frames);
 
-    static constexpr double kSpeedTimeConstant = 0.3;      // seconds
-    static constexpr double kStretchTargetBacklog = 0.125; // seconds, master's servo target
+    static constexpr double kSpeedTimeConstant = 0.3;        // seconds, the fast estimate
+    static constexpr std::size_t kSpeedWindowFrames = 65536; // ~2 s, the slow estimate
+    static constexpr std::size_t kSpeedWindowMax = 256;      // callbacks it can span
+    static constexpr std::size_t kSpeedWindowSettle = 32768; // frames before it is trusted
+    static constexpr double kStretchTargetBacklog = 0.125;   // seconds, master's servo target
     static constexpr double kStretchMinRatio = 0.05;
-    static constexpr std::size_t kLowWaterWindow = 8;
+    static constexpr std::size_t kFillBursts = 2;
+    // Beyond this fraction either side of the fast speed estimate, the servo is reseeded from
+    // it: its low-pass takes most of a second to follow a step, and a fast-forward released
+    // at tempo 3 runs the backlog dry long before then.
+    static constexpr double kServoResyncBand = 0.25;
+    // Callbacks the low-water window spans. The emulator's 60 Hz bursts beat against the
+    // sink's callbacks, so the depth sawtooths over a cycle of about 15 callbacks for any
+    // power-of-two callback size; a window shorter than that sees only the crest.
+    static constexpr std::size_t kLowWaterWindow = 32;
 
     // Filled by DspInterface::OutputFrame() on the emulation thread, drained here.
     Common::RingBuffer<s16, kMaxCallbackFrames, 2> fifo;
@@ -131,13 +165,21 @@ private:
     std::array<s16, FrameStash::kCapacity * 2> flush_scratch{};
 
     std::atomic<bool> enable_stretching{false};
+    std::atomic<double> requested_speed{1.0};
     std::atomic<bool> enable_ramp{true};
     std::atomic<bool> core_silenced{false};
 
-    // Arrival over request, smoothed: the speed the emulation actually runs at, as the audio
-    // thread sees it. fifo_left is the FIFO's depth after the previous callback's pops, so
-    // the difference at the next is what arrived in between.
+    // Arrival over request: the speed the emulation actually runs at, as the audio thread
+    // sees it. fifo_left is the FIFO's depth after the previous callback's pops, so the
+    // difference at the next is what arrived in between. Arrivals come a video frame at a
+    // time and beat against the callbacks, so `speed` is a ratio of sums over about two
+    // seconds, within a percent of the truth at any callback size, and `speed_fast` a short
+    // EMA that answers in a tenth of a second but dips to ~0.95 on every burst gap.
     double speed = 1.0;
+    double speed_fast = 1.0;
+    std::array<std::size_t, kSpeedWindowMax> arrivals{};
+    std::array<std::size_t, kSpeedWindowMax> requests{};
+    std::size_t speed_pos = 0;
     std::size_t fifo_left = 0;
     // Bypass emits nothing until the buffer first reaches the fill target: at reset, and after
     // each silence.
