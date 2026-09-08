@@ -8,6 +8,7 @@
 #include <span>
 #include <boost/serialization/access.hpp>
 #include "audio_core/audio_types.h"
+#include "audio_core/stream_ramp.h"
 #include "audio_core/time_stretch.h"
 #include "common/common_types.h"
 #include "common/ring_buffer.h"
@@ -102,6 +103,12 @@ public:
     Sink& GetSink();
     /// Enable/Disable audio stretching.
     void EnableStretching(bool enable);
+    /// The core has stopped producing audio on purpose: end the stream on a ramp rather than
+    /// wherever the waveform happens to be, and discard whatever it had already produced.
+    /// Any thread.
+    void StreamEnd();
+    /// The core is producing again: the next frames ramp back in. Any thread.
+    void StreamBegin();
 
 protected:
     void OutputFrame(StereoFrame16 frame);
@@ -110,6 +117,7 @@ protected:
 private:
     void FlushResidualStretcherAudio();
     void OutputCallback(s16* buffer, std::size_t num_frames);
+    void DiscardPending();
 
     Core::System& system;
 
@@ -117,8 +125,13 @@ private:
     std::atomic<bool> performing_time_stretching = false;
     std::atomic<bool> flushing_time_stretcher = false;
     Common::RingBuffer<s16, 0x2000, 2> fifo;
-    std::array<s16, 2> last_frame{};
     TimeStretcher time_stretcher;
+    static constexpr std::size_t kPopChunkFrames = 2048;
+    std::array<s16, kPopChunkFrames * 2> pop_scratch{};
+    // Ends the stream on a ramp and brings it back on one, on the last buffer before the sink.
+    // Audio thread only; core_silenced is how the other threads reach it.
+    StreamRamp ramp;
+    std::atomic<bool> core_silenced{false};
     std::unique_ptr<Sink> sink;
 
     template <class Archive>

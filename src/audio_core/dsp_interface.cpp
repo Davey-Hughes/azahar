@@ -3,6 +3,7 @@
 // Refer to the license.txt file included.
 
 #include <cstddef>
+#include <cstring>
 #include "audio_core/dsp_interface.h"
 #include "audio_core/sink.h"
 #include "audio_core/sink_details.h"
@@ -22,6 +23,8 @@ void DspInterface::SetSink(AudioCore::SinkType sink_type, std::string_view audio
     sink.reset();
 
     sink = AudioCore::GetSinkDetails(sink_type).create_sink(audio_device);
+    // A new sink is a new stream: nothing of the old one to continue, and it opens on a ramp.
+    ramp = StreamRamp{};
     sink->SetCallback(
         [this](s16* buffer, std::size_t num_frames) { OutputCallback(buffer, num_frames); });
     time_stretcher.SetOutputSampleRate(sink->GetNativeSampleRate());
@@ -34,6 +37,20 @@ Sink& DspInterface::GetSink() {
 
 void DspInterface::EnableStretching(bool enable) {
     enable_time_stretching = enable;
+}
+
+void DspInterface::StreamEnd() {
+    core_silenced.store(true, std::memory_order_release);
+}
+
+void DspInterface::StreamBegin() {
+    core_silenced.store(false, std::memory_order_release);
+}
+
+void DspInterface::DiscardPending() {
+    // Produced before the stream was taken down; behind the tail it would only splice in.
+    while (fifo.Pop(pop_scratch.data(), kPopChunkFrames) > 0) {
+    }
 }
 
 void DspInterface::OutputFrame(StereoFrame16 frame) {
@@ -80,8 +97,14 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
     }
     performing_time_stretching = enable_time_stretching.load();
 
+    // Taken down on purpose: nothing is popped, so the stretcher's bookkeeping stands still
+    // and picks up where it left off, and the ramp below fills the buffer with the tail.
+    const bool silenced = core_silenced.load(std::memory_order_acquire);
+
     std::size_t frames_written = 0;
-    if (performing_time_stretching) {
+    if (silenced) {
+        DiscardPending();
+    } else if (performing_time_stretching) {
         // Not a bare Pop(): that value-inits a vector to the FIFO's whole capacity every
         // callback. Sized to Size() instead, so a racing push just waits for the next one.
         const std::vector<s16> in{fifo.Pop(fifo.Size())};
@@ -100,14 +123,17 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
         frames_written += fifo.Pop(buffer, num_frames - frames_written);
     }
 
-    if (frames_written > 0) {
-        std::memcpy(&last_frame[0], buffer + 2 * (frames_written - 1), 2 * sizeof(s16));
+    // What the source did not fill is the ramp's to fill, below.
+    if (frames_written < num_frames) {
+        std::memset(buffer + (frames_written * 2), 0,
+                    (num_frames - frames_written) * 2 * sizeof(s16));
     }
 
-    // Hold last emitted frame; this prevents popping.
-    for (std::size_t i = frames_written; i < num_frames; i++) {
-        std::memcpy(buffer + 2 * i, &last_frame[0], 2 * sizeof(s16));
-    }
+    // Last before the volume, so the history it keeps is what was played and the tail it
+    // synthesizes from that history is scaled like everything else. Where the source stopped
+    // short, deliberately or not, the tail takes over from the frame it stopped on; when it
+    // returns, the first frames ramp in.
+    ramp.Process(buffer, num_frames, frames_written);
 
     // Implementation of the hardware volume slider
     // A cubic curve is used to approximate a linear change in human-perceived loudness
