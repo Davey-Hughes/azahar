@@ -4,6 +4,7 @@ add_library(audio_core STATIC EXCLUDE_FROM_ALL
     codec.h
     dsp_interface.cpp
     dsp_interface.h
+    frame_buffers.h
     hle/aac_decoder.cpp
     hle/aac_decoder.h
     hle/common.h
