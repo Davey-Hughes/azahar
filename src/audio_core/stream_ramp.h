@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstring>
 #include <numbers>
+#include "audio_core/period_finder.h"
 #include "common/common_types.h"
 
 namespace AudioCore {
@@ -216,48 +217,16 @@ private:
         return &tail_src[idx * 2];
     }
 
-    /// Period, in frames, whose copy of the last kCorrFrames frames matches them best. Scored
-    /// by distance rather than correlation: a normalised correlation is blind to level, so the
-    /// same phrase at half the volume would score a perfect match and repeating it would step
-    /// the waveform. Zero when there is too little history to search, leaving the DC ramp.
+    /// Period, in frames, whose copy of the last kCorrFrames frames matches them best; see
+    /// AudioCore::FindPeriod() (audio_core/period_finder.h). Zero when there is too little
+    /// history to search, leaving the DC ramp.
     unsigned FindPeriod() const {
-        if (tail_src_fill < kMinPeriod + kCorrFrames) {
-            return 0;
-        }
-        const unsigned max_p = std::min(kMaxPeriod, tail_src_fill - kCorrFrames);
-
-        // Matched on the channel sum: the two share a fundamental, and scoring them together
-        // stops a quiet channel's noise choosing the period for a loud one. The energy only
-        // decides whether there is anything here worth matching.
-        float e_ref = 0.0f;
-        for (unsigned k = 0; k < kCorrFrames; k++) {
-            const float* f = TailAt(1 + k);
-            const float v = f[0] + f[1];
-            e_ref += v * v;
-        }
-        if (e_ref <= 0.0f) {
-            return 0;
-        }
-
-        unsigned best = 0;
-        float best_diff = -1.0f;
-        for (unsigned p = kMinPeriod; p <= max_p; p++) {
-            float diff = 0.0f;
-            for (unsigned k = 0; k < kCorrFrames; k++) {
-                const float* a = TailAt(1 + k);
-                const float* b = TailAt(1 + p + k);
-                const float d = (a[0] + a[1]) - (b[0] + b[1]);
-                diff += d * d;
-            }
-            if (best_diff < 0.0f || diff < best_diff) {
-                best_diff = diff;
-                best = p;
-            }
-        }
-        // No threshold on the score: content with no periodicity has no right answer, and
-        // repeating the closest recent stretch of it still hands back the right spectrum at
-        // the right level.
-        return best;
+        return AudioCore::FindPeriod(
+            [this](unsigned k) {
+                const float* f = TailAt(1 + k);
+                return f[0] + f[1];
+            },
+            tail_src_fill, kMinPeriod, kMaxPeriod, kCorrFrames);
     }
 
     void Record(const s16* frames, std::size_t num_frames) {
