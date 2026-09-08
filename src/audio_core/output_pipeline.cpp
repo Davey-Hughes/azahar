@@ -240,11 +240,13 @@ void OutputPipeline::RenderChunk(s16* out, std::size_t num_frames) {
         EnterStretch();
     }
     if (mode != before) {
+        const std::size_t excess = Excess(num_frames);
         LOG_DEBUG(Audio,
                   "{} -> {}: speed {:.3f} ({:.3f} fast), {} frames buffered, {} in the "
-                  "stretcher, excess {}",
+                  "stretcher, {} excess ({} to trim)",
                   ModeName(before), ModeName(mode), speed, speed_fast, depth,
-                  time_stretcher.OutputBacklog(), Excess(num_frames));
+                  time_stretcher.OutputBacklog(), excess,
+                  excess > kTrimSlack ? excess - kTrimSlack : 0);
     }
 
     std::size_t written = 0;
@@ -371,7 +373,7 @@ void OutputPipeline::Engage() {
         history.Last(std::min({need, history.Size(), kMaxCallbackFrames}), pop_scratch.data());
     time_stretcher.Feed(pop_scratch.data(), have);
     const std::size_t dropped = time_stretcher.Discard(std::numeric_limits<std::size_t>::max());
-    warm_lag = static_cast<long>(have) - static_cast<long>(dropped);
+    warm_lag = static_cast<s64>(have) - static_cast<s64>(dropped);
     warm_raw_pos = 0;
     // The stash is ahead of the history and belongs to the stretcher next; the raw path plays
     // on from it meanwhile.
@@ -382,7 +384,7 @@ void OutputPipeline::Engage() {
 }
 
 std::size_t OutputPipeline::WarmDiscardNeeded() const {
-    const long needed = static_cast<long>(warm_raw_pos) + warm_lag;
+    const s64 needed = static_cast<s64>(warm_raw_pos) + warm_lag;
     return needed > 0 ? static_cast<std::size_t>(needed) : 0;
 }
 

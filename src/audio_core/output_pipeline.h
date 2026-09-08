@@ -195,7 +195,7 @@ private:
     // next output frame sits behind the frame the history ended on (history fed minus output
     // dropped at priming).
     std::size_t warm_raw_pos = 0;
-    long warm_lag = 0;
+    s64 warm_lag = 0;
     RenderStats last{};
 
     // Cross-fade across a handover, in output frames. Kept short: both sides are the same

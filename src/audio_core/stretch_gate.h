@@ -47,6 +47,8 @@ public:
     static constexpr double kRatioBand = 0.03;
     static constexpr double kDrainMinRatio = 1.0;
     static constexpr double kDrainMaxRatio = 1.1;
+    /// Slack on the drain bounds, for a ratio clamped to them in floating point.
+    static constexpr double kRatioEpsilon = 1e-9;
     /// Two seconds of callbacks at 32728 Hz.
     static constexpr std::size_t kDwellFrames = 65456;
     /// One second: room for the stretcher to build a round of reserve at the slowest speed a
@@ -103,8 +105,8 @@ public:
                 in_band_frames = 0;
                 return Edge::None;
             }
-            if (in.backlog <= in.num_frames && in.ratio >= kDrainMinRatio - 1e-9 &&
-                in.ratio <= kDrainMaxRatio + 1e-9) {
+            if (in.backlog <= in.num_frames && in.ratio >= kDrainMinRatio - kRatioEpsilon &&
+                in.ratio <= kDrainMaxRatio + kRatioEpsilon) {
                 mode = Mode::Bypass;
                 drain_forced = false;
                 return Edge::Handover;

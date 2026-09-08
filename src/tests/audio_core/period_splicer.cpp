@@ -125,6 +125,31 @@ TEST_CASE("PeriodSplicer::Cut drops a silent lead-in without touching the onset"
     REQUIRE(MaxDiff(out, expected, kCallback) == 0);
 }
 
+TEST_CASE("PeriodSplicer::Cut takes only its budget of a longer silent lead-in",
+          "[audio_core][bypass]") {
+    // 600 frames of silence, then the tone from its peak, with a budget of 300: the cut takes
+    // 300 of the silence and nothing else, so the tone still starts at its own first sample.
+    const auto tone = Sine(4000);
+    const std::size_t onset = kPeriod / 4;
+    std::vector<s16> stream(600 * 2, 0);
+    stream.insert(stream.end(), tone.begin() + (onset * 2), tone.end());
+    auto stash = Filled(stream);
+    std::vector<s16> out(kCallback * 2);
+    AudioCore::PeriodSplicer splicer;
+
+    const auto r = splicer.Cut(out.data(), kCallback, stash, 300);
+    REQUIRE(r.spliced == 300);
+    REQUIRE(r.written == kCallback);
+    REQUIRE(r.consumed == kCallback + 300);
+    for (std::size_t i = 0; i < 300 * 2; i++) {
+        REQUIRE(out[i] == 0);
+    }
+    const std::vector<s16> expected(tone.begin() + (onset * 2),
+                                    tone.begin() + ((onset + kCallback - 300) * 2));
+    std::vector<s16> rest(out.begin() + (300 * 2), out.end());
+    REQUIRE(MaxDiff(rest, expected, kCallback - 300) == 0);
+}
+
 TEST_CASE("PeriodSplicer::Cut copies a short stash without cutting", "[audio_core][bypass]") {
     const auto tone = Sine(300);
     auto stash = Filled(tone);
