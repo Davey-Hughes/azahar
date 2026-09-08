@@ -114,7 +114,8 @@ public:
     /// most one output batch over it. The content falls a tenth of a callback per callback
     /// in Drain, so the upper bound is crossed on the way down and is where the handover
     /// lands, and the excess the trim removes at kTrimRate is one batch plus the last
-    /// round's offset, about a second's worth.
+    /// round's offset: about a second at 512-frame callbacks, longer at large ones, whose
+    /// 32-callback low-water window takes longer to see the new depth.
     std::size_t HandoverLow(std::size_t num_frames) const;
     std::size_t HandoverHigh(std::size_t num_frames) const;
     /// Below this depth Bypass engages the stretcher: one callback plus half a burst, so an
@@ -232,9 +233,10 @@ private:
     // would trigger cuts at the right average depth. Each cut lowers every entry by what it
     // removed, so the minimum stays what the trough would be now rather than what it was.
     std::array<std::size_t, kLowWaterWindow> depth_window{};
-    // Whether the trim may cut now: grows by kTrimRate of each Bypass callback, up to two
-    // minimum periods so a stale window cannot prepay a burst, and each cut is charged in
-    // full, into debt for a long period. Audio thread only.
+    // Whether the trim may cut now: grows by kTrimRate of each Bypass callback, capped at
+    // two minimum periods (or one callback's accrual plus one, at large callbacks) so a
+    // stale window cannot prepay a burst, and each cut is charged in full, into debt for a
+    // long period. Audio thread only.
     s64 trim_credit = 0;
     std::size_t window_pos = 0;
     // Flushed frames still at the front of the stash after a Handover. They continue the

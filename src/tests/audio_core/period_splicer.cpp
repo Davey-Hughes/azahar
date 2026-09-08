@@ -73,6 +73,36 @@ TEST_CASE("PeriodSplicer::Cut removes one whole period of a tone invisibly",
     REQUIRE(stash.Data()[0] == tone[(kCallback + kPeriod) * 2]);
 }
 
+TEST_CASE("PeriodSplicer::Cut takes a period that fits the budget, or waits",
+          "[audio_core][bypass]") {
+    // A 150-frame tone: with a budget of 250 the cut is one whole period, not the
+    // best-fitting multiple over the whole range, which would not fit; with a budget of
+    // 120, under one period, nothing is cut rather than a phase step of up to 54 frames.
+    constexpr std::size_t period = 150;
+    std::vector<s16> tone(4000 * 2);
+    for (std::size_t i = 0; i < 4000; i++) {
+        const double phase =
+            2.0 * std::numbers::pi * static_cast<double>(i % period) / static_cast<double>(period);
+        const auto v = static_cast<s16>(std::lround(8000.0 * std::sin(phase)));
+        tone[i * 2] = v;
+        tone[(i * 2) + 1] = v;
+    }
+    AudioCore::PeriodSplicer splicer;
+    std::vector<s16> out(kCallback * 2);
+    auto fits = Filled(tone);
+    const auto r = splicer.Cut(out.data(), kCallback, fits, 250);
+    REQUIRE(r.spliced == period);
+    auto waits = Filled(tone);
+    const auto w = splicer.Cut(out.data(), kCallback, waits, 120);
+    REQUIRE(w.spliced == 0);
+    REQUIRE(w.written == kCallback);
+    // Noise has no period to wait for: the best fit within the budget is cut.
+    auto noisy = Filled(Noise(4000, 5));
+    const auto n = splicer.Cut(out.data(), kCallback, noisy, 98);
+    REQUIRE(n.spliced >= AudioCore::PeriodSplicer::kMinPeriod);
+    REQUIRE(n.spliced <= 98);
+}
+
 TEST_CASE("PeriodSplicer::Cut never cuts more than the budget or a period",
           "[audio_core][bypass]") {
     const auto tone = Sine(4000);
@@ -266,6 +296,22 @@ TEST_CASE("PeriodSplicer::JoinFlush declines when nothing continues the first st
     quiet.insert(quiet.end(), first.begin(), first.end());
     auto silent = Filled(quiet);
     REQUIRE(splicer.JoinFlush(silent, 3000) == 0);
+
+    // A copy that lies past the reach is not found: noise then declines, and a tone, on
+    // which any point in phase continues the first stream, joins within the reach only.
+    const auto noise = Noise(6000, 14);
+    std::vector<s16> far(noise.begin(), noise.begin() + (3000 * 2));
+    far.insert(far.end(), noise.begin() + (2000 * 2), noise.end());
+    auto out_of_reach = Filled(far);
+    REQUIRE(splicer.JoinFlush(out_of_reach, 3000, 200) == 0);
+    REQUIRE(out_of_reach.Size() == 7000);
+    const auto tone = Sine(6000);
+    std::vector<s16> far_tone(tone.begin(), tone.begin() + (3000 * 2));
+    far_tone.insert(far_tone.end(), tone.begin() + (2000 * 2), tone.end());
+    auto within = Filled(far_tone);
+    const std::size_t joined = splicer.JoinFlush(within, 3000, 200);
+    REQUIRE(joined <= 200);
+    REQUIRE(within.Size() == 7000 - joined);
 }
 
 TEST_CASE("PeriodSplicer::Insert on noise repeats a period that fits the join",

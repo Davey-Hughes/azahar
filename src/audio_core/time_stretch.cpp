@@ -238,7 +238,6 @@ std::size_t TimeStretcher::FlushInto(s16* out, std::size_t max_frames) {
     if (end < got && end > floor) {
         end = end > overlap ? end - overlap : 0;
     }
-    last_flush_short = expected > end ? expected - end : 0;
     return end;
 }
 

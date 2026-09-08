@@ -376,18 +376,18 @@ std::size_t OutputPipeline::RenderBypass(s16* out, std::size_t num_frames, Rende
                     break;
                 }
                 boundary = flush_left - back;
-                stats.joined = splicer.JoinFlush(stash, boundary);
+                stats.joined = splicer.JoinFlush(stash, boundary, back + flush_tail);
             }
             stats.join_matched = stats.joined > 0;
             stats.join_at = stats.join_matched ? boundary : flush_left;
             if (!stats.join_matched) {
                 // Silence, antiphase stereo, or too little on one side: the tail's copy of
-                // what the flush played is dropped by the flush's estimated shortfall, and
-                // the seam stays where it is, under a fade centered on it, the estimate's
-                // error under a seek window.
-                const std::size_t copied = flush_tail > time_stretcher.LastFlushShortfall()
-                                               ? flush_tail - time_stretcher.LastFlushShortfall()
-                                               : 0;
+                // what the flush played is dropped down to the most a flush can fall short
+                // of, and the seam stays where it is, under a fade centered on it. What is
+                // left of the copy, up to a seek window and an overlap less the true
+                // shortfall, repeats: silence, in every case that declines.
+                const std::size_t keep = time_stretcher.FlushShortfall();
+                const std::size_t copied = flush_tail > keep ? flush_tail - keep : 0;
                 stats.joined = std::min(copied, stash.Size() - std::min(stash.Size(), flush_left));
                 stash.Erase(flush_left, stats.joined);
                 const std::size_t half = kSeamFadeFrames / 2;
@@ -397,9 +397,11 @@ std::size_t OutputPipeline::RenderBypass(s16* out, std::size_t num_frames, Rende
         }
     } else {
         const std::size_t excess = Excess(num_frames);
-        trim_credit = std::min<s64>(
-            trim_credit + static_cast<s64>(kTrimRate * static_cast<double>(num_frames)),
-            2 * static_cast<s64>(PeriodSplicer::kMinPeriod));
+        const s64 accrual = static_cast<s64>(kTrimRate * static_cast<double>(num_frames));
+        trim_credit =
+            std::min<s64>(trim_credit + accrual,
+                          std::max<s64>(2 * static_cast<s64>(PeriodSplicer::kMinPeriod),
+                                        accrual + static_cast<s64>(PeriodSplicer::kMinPeriod)));
         if (trim_credit >= static_cast<s64>(PeriodSplicer::kMinPeriod)) {
             budget = excess > kTrimSlack ? excess - kTrimSlack : 0;
         }
@@ -519,6 +521,10 @@ void OutputPipeline::Handover(RenderStats& stats) {
     // After it, the last frames the stretcher was fed, which the flush falls short of and
     // the FIFO's next frame follows: the join at the seam finds where in them the flush's
     // last frames recur, and drops the copy, so the raw stream continues the flush exactly.
+    // That rests on the tail holding exactly the frames that entered the stretcher, so
+    // that the FIFO's next frame is the one after its last; input the servo's cap dropped
+    // (TimeStretcher::Process(), audio_core/time_stretch.cpp) leaves a gap, but needs a
+    // backlog over a second, which a drain never holds.
     const std::size_t tail_room = std::min(stash.Room(), flush_scratch.size() / 2);
     flush_tail = stash.Append(flush_scratch.data(),
                               time_stretcher.CopyFedTail(flush_scratch.data(), tail_room));

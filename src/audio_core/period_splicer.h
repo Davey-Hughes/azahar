@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <numbers>
 #include "audio_core/frame_buffers.h"
 #include "audio_core/period_finder.h"
@@ -33,8 +34,9 @@ public:
     /// The fraction of the reference's energy a join's best mismatch may reach; see JoinFlush().
     static constexpr float kJoinAcceptFraction = 0.5f;
     /// Under this fraction of the reference's energy, the best period's mismatch says the
-    /// material is periodic, and only a whole period of it is cut; see Cut().
-    static constexpr float kPeriodicFraction = 0.5f;
+    /// material is periodic, and only a whole period of it is cut; see Cut(). On a tone the
+    /// mismatch is 2 - 2 cos(phase error), so 0.2 admits about 26 degrees.
+    static constexpr float kPeriodicFraction = 0.2f;
 
     struct Result {
         std::size_t written;  // frames written to out
@@ -56,17 +58,24 @@ public:
                 {static_cast<std::size_t>(kMaxPeriod), budget, avail - num_frames});
             if (max_p >= kMinPeriod) {
                 // A whole period of the material, or nothing: with the budget under the
-                // material's period, the best fit within it is a phase step. So search the
-                // whole range first, take its period when it fits, decline when it does not
-                // and the material is periodic, and take the best fit within the budget
-                // only where there is no period to speak of.
-                const std::size_t full_max =
-                    std::min<std::size_t>(static_cast<std::size_t>(kMaxPeriod), avail - num_frames);
+                // material's period, the best fit within it is a phase step. Ask the budget
+                // first, since a period that fits and is itself periodic is what to cut
+                // (the whole range would name the best-fitting multiple, near the top, and
+                // wait on a budget that never reaches it). When nothing periodic fits, look
+                // wider: a period out there means periodic material, so decline and let the
+                // credit wait; none means noise, and the best fit within the budget will do.
                 float score = 0.0f;
                 float energy = 0.0f;
-                p = Find(a, avail, full_max, &score, &energy);
-                if (p > max_p) {
-                    p = score <= kPeriodicFraction * energy ? 0 : Find(a, avail, max_p);
+                p = Find(a, avail, max_p, &score, &energy);
+                if (p != 0 && score > kPeriodicFraction * energy) {
+                    const std::size_t full_max = std::min<std::size_t>(
+                        static_cast<std::size_t>(kMaxPeriod), avail - num_frames);
+                    float wide = 0.0f;
+                    float wide_energy = 0.0f;
+                    if (full_max > max_p && Find(a, avail, full_max, &wide, &wide_energy) != 0 &&
+                        wide <= kPeriodicFraction * wide_energy) {
+                        p = 0;
+                    }
                 } else if (p == 0) {
                     // Nothing to match in silence, and nothing to hear: drop the silent run,
                     // but only that, so whatever follows keeps its onset.
@@ -150,8 +159,10 @@ public:
     /// silence (scored on the channel sum, so antiphase stereo counts) and any junction will
     /// do, or when nothing within reach continues it, as when the first stream's end is a
     /// WSOLA blend of two segments that the second holds only one of; the caller then steps
-    /// the boundary back past the blend, or fades across the seam.
-    std::size_t JoinFlush(FrameStash& stash, std::size_t boundary) {
+    /// the boundary back past the blend, or fades across the seam. `reach` bounds the search
+    /// to the frames past the boundary that can hold the copy.
+    std::size_t JoinFlush(FrameStash& stash, std::size_t boundary,
+                          std::size_t reach = std::numeric_limits<std::size_t>::max()) {
         const std::size_t avail = stash.Size();
         if (boundary < kJoinFrames || avail < boundary + kCorrFrames + kMinPeriod) {
             return 0;
@@ -170,8 +181,15 @@ public:
         }
         // The candidate is where the second stream resumes; the kCorrFrames before it are
         // what it is scored on, and they must lie inside the second stream.
+        // `reach` is how far past the boundary the copy can lie, the fed tail's length: a
+        // candidate beyond it is in frames the first stream never played, where a chance
+        // match on periodic material would erase real audio.
         const std::size_t first = boundary + kCorrFrames;
-        const std::size_t last = std::min<std::size_t>(first + kJoinSearch, avail);
+        const std::size_t reach_end = reach > avail - boundary ? avail : boundary + reach;
+        const std::size_t last = std::min<std::size_t>({first + kJoinSearch, reach_end});
+        if (last < first) {
+            return 0;
+        }
         std::size_t best = first;
         float best_diff = -1.0f;
         for (std::size_t p = first; p <= last; p++) {
