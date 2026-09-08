@@ -148,6 +148,14 @@ TEST_CASE("StretchGate drains after two seconds in band with the ratio near one"
         REQUIRE(gate.Update(In(1.0)) == Edge::None);
         REQUIRE(gate.CurrentMode() == Mode::Drain);
     }
+    SECTION("a slight deficit keeps it stretching, since Bypass cannot cover one") {
+        StretchGate gate = Stretching();
+        REQUIRE(Repeat(gate, In(0.995), 300) == Edge::None);
+        REQUIRE(gate.CurrentMode() == Mode::Stretch);
+        // What the slow estimate reads at true full speed, at its burst granularity.
+        REQUIRE(Repeat(gate, In(0.9988), 128) == Edge::None);
+        REQUIRE(gate.CurrentMode() == Mode::Drain);
+    }
     SECTION("ratio off keeps it stretching") {
         StretchGate gate = Stretching();
         auto in = In(1.0);

@@ -43,7 +43,13 @@ public:
     static constexpr double kEngageHigh = 1.05;
     /// The fast estimate sees a burst gap as a dip to ~0.95, so it engages only well below.
     static constexpr double kEngageFast = 0.90;
-    static constexpr double kDisengageBand = 0.01;
+    /// Stretch drains toward Bypass only inside (kDisengageLow, kDisengageHigh). Bypass can
+    /// trim a surplus but not cover a deficit, so the low side sits just under what the slow
+    /// estimate reads at true full speed (0.9988 or 1.0071 at its burst granularity), and a
+    /// host at 99.5% stays stretched rather than cycling through a handover every ten
+    /// seconds.
+    static constexpr double kDisengageLow = 0.998;
+    static constexpr double kDisengageHigh = 1.01;
     static constexpr double kRatioBand = 0.03;
     static constexpr double kDrainMinRatio = 1.0;
     static constexpr double kDrainMaxRatio = 1.1;
@@ -126,7 +132,7 @@ public:
 
 private:
     static bool InBand(double speed) {
-        return std::abs(speed - 1.0) < kDisengageBand;
+        return speed >= kDisengageLow && speed < kDisengageHigh;
     }
 
     Mode mode = Mode::Bypass;
