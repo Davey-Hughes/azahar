@@ -29,6 +29,7 @@ add_library(audio_core STATIC EXCLUDE_FROM_ALL
     null_input.h
     null_sink.h
     period_finder.h
+    period_splicer.h
     precompiled_headers.h
     sink.h
     sink_details.cpp
