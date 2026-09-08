@@ -70,6 +70,8 @@ void OutputPipeline::Reset() {
     window_pos = 0;
     warm_raw_pos = 0;
     warm_lag = 0;
+    flush_left = 0;
+    time_stretcher.SetRatio(1.0);
     last = {};
     fade_out_frames = 0;
     fade_out_from = {};
@@ -119,7 +121,12 @@ bool OutputPipeline::JumpBegin() {
     // is settled as it stands, and there is nothing to wait for. Deadline-bounded, since a sink
     // that never calls back (null, or the libretro sink's immediate submission) settles nothing;
     // a wakeup lost between the predicate and the wait costs the deadline, not the tail.
-    const auto deadline = std::chrono::steady_clock::now() + kJumpSettleTimeout;
+    const std::size_t frames = last_callback_frames.load(std::memory_order_relaxed);
+    const auto two_callbacks = std::chrono::microseconds(
+        static_cast<long long>(2.0 * static_cast<double>(frames) / native_sample_rate * 1e6));
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        std::max<std::chrono::steady_clock::duration>(kJumpSettleTimeout, two_callbacks);
     std::unique_lock lock{settled_mutex};
     settled_cv.wait_until(lock, deadline,
                           [this] { return stream_settled.load(std::memory_order_acquire); });
@@ -155,6 +162,7 @@ void OutputPipeline::Render(s16* out, std::size_t num_frames) {
 
 void OutputPipeline::RenderChunk(s16* out, std::size_t num_frames) {
     const bool silenced = core_silenced.load(std::memory_order_acquire);
+    last_callback_frames.store(num_frames, std::memory_order_relaxed);
     const std::size_t fifo_now = fifo.Size();
     const std::size_t depth = fifo_now + stash.Size();
 
@@ -218,6 +226,7 @@ void OutputPipeline::RenderChunk(s16* out, std::size_t num_frames) {
     RenderStats stats{};
     stats.edge = edge;
     stats.depth = depth;
+    stats.silenced = silenced;
     switch (edge) {
     case StretchGate::Edge::Engage:
         Engage();
@@ -317,9 +326,24 @@ std::size_t OutputPipeline::RenderBypass(s16* out, std::size_t num_frames, Rende
     }
     depth_window[window_pos] = stats.depth;
     cut_window[window_pos] = 0;
-    const std::size_t excess = Excess(num_frames);
-    const auto r =
-        splicer.Cut(out, num_frames, stash, excess > kTrimSlack ? excess - kTrimSlack : 0);
+    std::size_t budget = 0;
+    if (flush_left > 0) {
+        // Flushed frames play out untouched. When the boundary is about to fall inside a
+        // callback, pull what the FIFO has and close the seam in the stash first; the join is
+        // the first trim, and the low-water window is stale until it has seen this depth.
+        if (flush_left <= num_frames + PeriodSplicer::kJoinFrames) {
+            stash.PullFrom(fifo, FrameStash::kCapacity);
+            stats.joined = splicer.JoinFlush(stash, flush_left);
+            flush_left = 0;
+        }
+    } else {
+        const std::size_t excess = Excess(num_frames);
+        budget = excess > kTrimSlack ? excess - kTrimSlack : 0;
+    }
+    const auto r = splicer.Cut(out, num_frames, stash, budget);
+    if (flush_left > 0) {
+        flush_left -= std::min(flush_left, r.consumed);
+    }
     cut_window[window_pos] = r.spliced;
     window_pos = (window_pos + 1) % kLowWaterWindow;
     history.Record(out, r.written);
@@ -334,6 +358,15 @@ std::size_t OutputPipeline::RenderWarming(s16* out, std::size_t num_frames, Rend
     const std::size_t pulled = stash.PullFrom(fifo, FrameStash::kCapacity);
     if (pulled > 0) {
         time_stretcher.Feed(stash.Data() + ((stash.Size() - pulled) * 2), pulled);
+    }
+    // Back from a silence with nothing in hand: hold on the ramp until the buffer is where
+    // Bypass would start from, rather than dribble out each burst as it lands. The stretcher
+    // is fed above regardless, so the warm-up keeps making progress.
+    if (prefilling) {
+        if (stats.depth < PrefillTarget(num_frames)) {
+            return 0;
+        }
+        prefilling = false;
     }
     // Insert() falls back to a plain copy on its own when the stash is too short to repeat
     // from; the ramp covers whatever that leaves short.
@@ -407,8 +440,9 @@ void OutputPipeline::Handover(RenderStats& stats) {
     const std::size_t room = std::min(stash.Room(), flush_scratch.size() / 2);
     const std::size_t got = time_stretcher.FlushInto(flush_scratch.data(), room);
     stats.flushed = stash.Append(flush_scratch.data(), got);
+    // The flush continues the stretcher's output exactly; the seam comes when it runs out.
+    flush_left = stats.flushed;
     prefilling = false;
-    ArmHandoverFade();
     LOG_DEBUG(Audio, "stretcher handed over {} frames", stats.flushed);
 }
 
@@ -428,6 +462,12 @@ void OutputPipeline::DiscardPending() {
     // Produced before the stream was taken down; behind the tail it would only splice in.
     while (fifo.Pop(pop_scratch.data(), kMaxCallbackFrames) > 0) {
     }
+    // In Warming the stash's frames are already inside the stretcher. Skipped here, they
+    // count as played for the Sync discard, or the stretcher would replay them on resume.
+    if (gate.CurrentMode() == StretchGate::Mode::Warming) {
+        warm_raw_pos += stash.Size();
+    }
+    flush_left -= std::min(flush_left, stash.Size());
     stash.Clear();
 }
 

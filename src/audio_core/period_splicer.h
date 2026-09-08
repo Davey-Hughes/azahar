@@ -28,6 +28,8 @@ public:
     static constexpr unsigned kMaxPeriod = 1024;
     static constexpr unsigned kCorrFrames = 128;
     static constexpr unsigned kJoinFrames = 128;
+    /// How far into the second stream JoinFlush() looks for the continuation, in frames.
+    static constexpr unsigned kJoinSearch = 2048;
 
     struct Result {
         std::size_t written;  // frames written to out
@@ -104,6 +106,58 @@ public:
                     (num_frames - p - kJoinFrames) * 2 * sizeof(s16));
         stash.Consume(num_frames - p);
         return {num_frames, num_frames - p, p};
+    }
+
+    /// The stash holds `boundary` frames of one stream and then a second that should continue
+    /// it but does not quite: a stretcher's flush is off by its last round's seek jitter and by
+    /// every tempo step it took with input resident. Finds where the second stream best
+    /// continues the first's last kCorrFrames, cross-fades the first's last kJoinFrames into
+    /// the frames before that point, and drops what lies between, so the join is phase
+    /// continuous. Returns the frames dropped; 0, with the stash untouched, when either side
+    /// is too short to search, or the first stream ends in silence and any junction will do.
+    std::size_t JoinFlush(FrameStash& stash, std::size_t boundary) {
+        const std::size_t avail = stash.Size();
+        if (boundary < kJoinFrames || avail < boundary + kCorrFrames + kMinPeriod) {
+            return 0;
+        }
+        s16* a = stash.MutableData();
+        const auto sum_at = [a](std::size_t i) {
+            return static_cast<float>(a[i * 2]) + static_cast<float>(a[(i * 2) + 1]);
+        };
+        float e_ref = 0.0f;
+        for (std::size_t k = 0; k < kCorrFrames; k++) {
+            const float v = sum_at(boundary - kCorrFrames + k);
+            e_ref += v * v;
+        }
+        if (e_ref <= 0.0f) {
+            return 0;
+        }
+        // The candidate is where the second stream resumes; the kCorrFrames before it are
+        // what it is scored on, and they must lie inside the second stream.
+        const std::size_t first = boundary + kCorrFrames;
+        const std::size_t last = std::min<std::size_t>(first + kJoinSearch, avail);
+        std::size_t best = first;
+        float best_diff = -1.0f;
+        for (std::size_t p = first; p <= last; p++) {
+            float diff = 0.0f;
+            for (std::size_t k = 0; k < kCorrFrames; k++) {
+                const float d = sum_at(boundary - kCorrFrames + k) - sum_at(p - kCorrFrames + k);
+                diff += d * d;
+            }
+            if (best_diff < 0.0f || diff < best_diff) {
+                best_diff = diff;
+                best = p;
+            }
+        }
+        for (std::size_t i = 0; i < kJoinFrames; i++) {
+            const float w = Ramp(i, kJoinFrames);
+            const std::size_t into = boundary - kJoinFrames + i;
+            const std::size_t from = best - kJoinFrames + i;
+            a[into * 2] = Blend(a[into * 2], a[from * 2], w);
+            a[(into * 2) + 1] = Blend(a[(into * 2) + 1], a[(from * 2) + 1], w);
+        }
+        stash.Erase(boundary, best - boundary);
+        return best - boundary;
     }
 
 private:

@@ -102,6 +102,14 @@ struct Run {
         }
         return callbacks.size();
     }
+    std::size_t FirstSilenced() const {
+        for (std::size_t c = 0; c < callbacks.size(); c++) {
+            if (callbacks[c].stats.silenced) {
+                return c;
+            }
+        }
+        return callbacks.size();
+    }
     std::size_t FirstEdge(Edge edge, std::size_t from = 0) const {
         for (std::size_t c = from; c < callbacks.size(); c++) {
             if (callbacks[c].stats.edge == edge) {
@@ -180,16 +188,17 @@ Run Simulate(OutputPipeline& pipeline, double seconds,
     return run;
 }
 
-/// Every callback in [first, last) was filled in full. An Engage on an empty buffer is the
-/// one exception: the raw path may come up a fraction short on that callback and the two
-/// after it while the repeat catches up, and the ramp covers those frames.
+/// Every callback in [first, last) was filled in full. Two exceptions: an Engage on an
+/// empty buffer, where the raw path may come up short on that callback and the two after it
+/// while the repeat catches up, and callbacks the core had silenced, which render nothing by
+/// design. The ramp covers both.
 void RequireFilled(const Run& run, std::size_t first, std::size_t last) {
     std::size_t exempt_until = 0;
     for (std::size_t c = first; c < last && c < run.callbacks.size(); c++) {
         if (run.callbacks[c].stats.edge == Edge::Engage) {
             exempt_until = c + 3;
         }
-        if (c < exempt_until) {
+        if (c < exempt_until || run.callbacks[c].stats.silenced) {
             continue;
         }
         INFO("callback " << c << " at " << Run::TimeOf(c) << " s, mode "
@@ -198,31 +207,45 @@ void RequireFilled(const Run& run, std::size_t first, std::size_t last) {
     }
 }
 
-/// Walks the output locating each frame in the source. In Bypass and Warming, consecutive
-/// located frames advance by one, except across the one splice a callback may carry, where
-/// the jump is the splice's size in its direction. The first located frame after a Sync or a
-/// Handover is a seam, allowed kSeamBound either way. Stretch and Drain output is WSOLA and
-/// is not checked, nor are the callbacks that still play a Handover's flushed frames.
+/// Walks the output locating each frame in the source.
+///
+/// In Bypass and Warming, consecutive located frames advance by one, except across the one
+/// splice a callback may carry, where the jump is the splice's size in its direction. The
+/// first located frame after a Sync or a Handover is a seam, allowed kSeamBound either way.
+/// Between a Handover and the join that ends its flushed run, the frames are the stretcher's
+/// own output and may carry its round jitter, again within kSeamBound; the join callback
+/// must show exactly one jump matching what it dropped, within kSeamBound, under a blended
+/// gap of at least kJoinFrames. Stretch and Drain output is WSOLA and is not checked.
+///
+/// A callback the source could not fill, or that the core had silenced, carries the ramp's
+/// synthesized tail, whose repeat of recent audio can locate; the tail can run on into the
+/// next callback, and the ramp then mutes a callback's worth and ramps another in. Tracking
+/// starts over at the next located frame, and the located-fraction check waits four
+/// callbacks.
+///
+/// So that a pipeline emitting silence or garbage cannot pass by locating nothing: a raw
+/// callback must locate at least 95% of its frames, 70% when it carries a splice or a join
+/// (128 blended frames), 40% when it carries an edge (a 256-frame cross-fade), and every
+/// seam callback must locate at least one frame.
 void CheckTimeline(const Run& run, const SourceIndex& index, std::size_t first_callback) {
     const std::size_t total = run.out.size() / 2;
     std::optional<std::size_t> last_j;
     std::optional<std::size_t> last_p;
-    std::size_t flushed_until = 0;
+    std::size_t skip_until = 0;
+    bool in_flush = false;
     for (std::size_t c = first_callback; c < run.callbacks.size(); c++) {
         const auto& cb = run.callbacks[c];
-        if (cb.stats.edge == Edge::Handover) {
-            flushed_until = c + 1 + ((cb.stats.flushed + kCallback - 1) / kCallback);
-        }
-        // A callback the source could not fill carries the ramp's synthesized tail, whose
-        // repeat of recent audio can locate; and the ramp mutes what follows. Neither is the
-        // timeline: start over at the next located frame.
-        if (cb.stats.written < kCallback) {
+        if (cb.stats.silenced || cb.stats.written < kCallback) {
             last_j.reset();
             last_p.reset();
+            skip_until = c + 5;
             continue;
         }
-        const bool raw =
-            (cb.mode == Mode::Bypass || cb.mode == Mode::Warming) && c >= flushed_until;
+        if (cb.stats.edge == Edge::Handover) {
+            in_flush = true;
+        }
+        const bool raw = cb.mode == Mode::Bypass || cb.mode == Mode::Warming;
+        const bool join = cb.stats.joined > 0;
         bool seam = cb.stats.edge == Edge::Sync || cb.stats.edge == Edge::Handover;
         long allowed = 0;
         if (cb.stats.cut > 0) {
@@ -232,19 +255,28 @@ void CheckTimeline(const Run& run, const SourceIndex& index, std::size_t first_c
             allowed = -static_cast<long>(cb.stats.inserted);
         }
         bool jumped = false;
+        std::size_t join_jumps = 0;
+        std::size_t located = 0;
         for (std::size_t j = c * kCallback; j < (c + 1) * kCallback && j + kKey <= total; j++) {
             const auto p = index.Locate(&run.out[j * 2]);
             if (!p) {
                 continue;
             }
+            located++;
             if (last_j) {
-                const long jump = static_cast<long>(*p) - static_cast<long>(*last_p) -
-                                  static_cast<long>(j - *last_j);
+                const long gap = static_cast<long>(j - *last_j);
+                const long jump = static_cast<long>(*p) - static_cast<long>(*last_p) - gap;
                 INFO("callback " << c << " at " << Run::TimeOf(c) << " s, frame " << j << ", jump "
-                                 << jump);
+                                 << jump << ", gap " << gap);
                 if (seam) {
                     REQUIRE(std::abs(jump) <= kSeamBound);
                     seam = false;
+                } else if (join && jump != 0 &&
+                           std::abs(jump - static_cast<long>(cb.stats.joined)) <= kSeamBound) {
+                    REQUIRE(gap >= static_cast<long>(PeriodSplicer::kJoinFrames));
+                    join_jumps++;
+                } else if (raw && (in_flush || join)) {
+                    REQUIRE(std::abs(jump) <= kSeamBound);
                 } else if (raw && jump != 0) {
                     REQUIRE(jump == allowed);
                     REQUIRE(!jumped);
@@ -253,6 +285,20 @@ void CheckTimeline(const Run& run, const SourceIndex& index, std::size_t first_c
             }
             last_j = j;
             last_p = p;
+        }
+        INFO("callback " << c << " at " << Run::TimeOf(c) << " s located " << located << " of "
+                         << kCallback);
+        if (join) {
+            REQUIRE(join_jumps == 1);
+            in_flush = false;
+        }
+        if (cb.stats.edge == Edge::Sync || cb.stats.edge == Edge::Handover) {
+            REQUIRE(located >= 1);
+        }
+        if (raw && !in_flush && c >= skip_until) {
+            const bool spliced = cb.stats.cut > 0 || cb.stats.inserted > 0 || join;
+            const double threshold = cb.stats.edge != Edge::None ? 0.40 : spliced ? 0.70 : 0.95;
+            REQUIRE(static_cast<double>(located) >= threshold * static_cast<double>(kCallback));
         }
     }
 }
@@ -425,4 +471,36 @@ TEST_CASE("OutputPipeline drains and hands over when stretching is turned off",
         REQUIRE(run.callbacks[c].mode == Mode::Bypass);
     }
     REQUIRE(run.FirstEdge(Edge::Engage, handover) == run.callbacks.size());
+    const SourceIndex index(run.pushed);
+    CheckTimeline(run, index, run.FirstFilled() + 2);
+}
+
+TEST_CASE("OutputPipeline resumes a warm-up across a pause without replaying",
+          "[audio_core][bypass]") {
+    // The dip engages by ~4.35 s and syncs around 4.6 s; the core takes the stream down for
+    // half a second in the middle of the warm-up. The stash it discards is already inside the
+    // stretcher, and the Sync discard must count those frames as played, or they come back
+    // as a replay.
+    auto pipeline = Fresh();
+    const Run run = Simulate(*pipeline, 12.0, Dip, [](double t, OutputPipeline& p) {
+        if (t >= 4.45 && t < 4.95) {
+            p.StreamEnd();
+        } else {
+            p.StreamBegin();
+        }
+    });
+    const SourceIndex index(run.pushed);
+
+    const std::size_t engage = run.FirstEdge(Edge::Engage);
+    const std::size_t sync = run.FirstEdge(Edge::Sync);
+    REQUIRE(engage < run.callbacks.size());
+    REQUIRE(sync < run.callbacks.size());
+    REQUIRE(Run::TimeOf(engage) < 4.45);
+    REQUIRE(Run::TimeOf(sync) >= 4.95);
+    REQUIRE(run.callbacks[sync].stats.replayed == 0);
+    // Full up to the pause; after it the warm-up refills on the ramp before it plays, so
+    // the requirement resumes at the switch.
+    RequireFilled(run, run.FirstFilled(), run.FirstSilenced());
+    RequireFilled(run, sync, run.callbacks.size());
+    CheckTimeline(run, index, run.FirstFilled() + 2);
 }

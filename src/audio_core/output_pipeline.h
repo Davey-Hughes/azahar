@@ -51,7 +51,9 @@ public:
         std::size_t cut = 0;      // frames the splicer removed
         std::size_t inserted = 0; // frames the splicer repeated
         std::size_t flushed = 0;  // frames the stretcher handed to the stash at Handover
+        std::size_t joined = 0;   // frames dropped where the flushed frames met the FIFO's
         std::size_t replayed = 0; // frames of stretcher output a forced Sync could not skip
+        bool silenced = false;    // the core had the stream down; nothing was rendered
         std::size_t depth = 0;    // fifo + stash at the start of the callback
         StretchGate::Edge edge = StretchGate::Edge::None;
     };
@@ -191,6 +193,10 @@ private:
     std::array<std::size_t, kLowWaterWindow> depth_window{};
     std::array<std::size_t, kLowWaterWindow> cut_window{};
     std::size_t window_pos = 0;
+    // Flushed frames still at the front of the stash after a Handover. They continue the
+    // stretcher's output exactly; the seam is where they run out and the FIFO's frames take
+    // over, off by the flush's count error, and PeriodSplicer::JoinFlush() closes it there.
+    std::size_t flush_left = 0;
     // Warm-up: source frames the raw path consumed since Engage, and how far the stretcher's
     // next output frame sits behind the frame the history ended on (history fed minus output
     // dropped at priming).
@@ -220,6 +226,9 @@ private:
     // is settled, having nothing to take down. The audio thread signals the condition variable
     // on the rising edge alone; the mutex is the waiter's, and the callback never takes it.
     std::atomic<bool> stream_settled{true};
+    // The last callback's size, so JumpBegin() can wait at least two callbacks for the tail
+    // to reach the sink whatever the sink's callback size.
+    std::atomic<std::size_t> last_callback_frames{0};
     std::mutex settled_mutex;
     std::condition_variable settled_cv;
 };
