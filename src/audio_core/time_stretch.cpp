@@ -17,6 +17,10 @@
 
 namespace AudioCore {
 
+namespace {
+constexpr double kBacklogCapSeconds = 1.0;
+} // namespace
+
 static_assert(std::is_floating_point_v<soundtouch::SAMPLETYPE> ||
               std::is_same_v<soundtouch::SAMPLETYPE, s16>);
 
@@ -86,10 +90,13 @@ std::size_t TimeStretcher::Process(const s16* in, std::size_t num_in, s16* out,
     const double time_delta = static_cast<double>(num_out) / native_sample_rate; // seconds
     double current_ratio = static_cast<double>(num_in) / static_cast<double>(num_out);
 
-    // Twice the target: the servo steers toward 50% of this, and stops accepting input at 400%.
+    // Twice the target: the servo steers toward 50% of this.
     const double max_backlog = 2.0 * target_backlog_seconds * native_sample_rate;
     const double backlog_fullness = sound_touch->numSamples() / max_backlog;
-    if (backlog_fullness > 4.0) {
+    // The cap on what it will hold is a fixed second, what master's 400% of its 0.25 s came
+    // to. Tied to the target it would fall with it, and a drain toward a small target would
+    // then drop the input it was supposed to play.
+    if (sound_touch->numSamples() > kBacklogCapSeconds * native_sample_rate) {
         // Too many samples in backlog: Don't push anymore on
         num_in = 0;
     }
