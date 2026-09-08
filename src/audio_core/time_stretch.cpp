@@ -180,21 +180,70 @@ std::size_t TimeStretcher::Discard(std::size_t max_frames) {
 }
 
 std::size_t TimeStretcher::FlushInto(s16* out, std::size_t max_frames) {
-    sound_touch->flush();
+    // SoundTouch's own flush() trims to what it expected when each frame was fed, at the
+    // tempo of that moment; after a tempo step with input resident that expectation can be
+    // short by the whole residency, which it then discards, some 50 ms after a fast-forward
+    // release. So: pad with silence, read past where the audio can end, and trim back to it.
+    // The estimate of what is inside is the backlog plus the residency at the current tempo;
+    // the last round lands within a seek window of that, and blends its tail with the
+    // silence over one overlap. The read goes that far into the padding, and the trailing
+    // silence is trimmed along with the blended overlap, so the flush ends on clean audio.
+    const std::size_t residency = sound_touch->numUnprocessedSamples();
+    const std::size_t overlap = OverlapFrames();
+    const std::size_t seek = SeekFrames();
+    const std::size_t expected =
+        sound_touch->numSamples() +
+        static_cast<std::size_t>(static_cast<double>(residency) / stretch_ratio);
+    const std::size_t want = std::min(expected + seek + overlap, max_frames);
+
+    // Bounded, for a stretcher that cannot make another round however much it is fed.
+    static constexpr std::size_t kPadFrames = 128;
+    static constexpr std::array<s16, kPadFrames * 2> zeros{};
+    for (std::size_t fed = 0; sound_touch->numSamples() < want && fed < (2 * want) + 8192;
+         fed += kPadFrames) {
+        Put(zeros.data(), kPadFrames);
+    }
+
     std::size_t got = 0;
-    while (got < max_frames) {
-        const std::size_t n = Receive(out + (got * 2), max_frames - got);
+    while (got < want) {
+        const std::size_t n = Receive(out + (got * 2), want - got);
         if (n == 0) {
             break;
         }
         got += n;
     }
-    const std::size_t left = sound_touch->numSamples();
-    if (left > 0) {
-        LOG_WARNING(Audio, "Stretcher flush overran its stash by {} frames; dropped", left);
+    if (expected > max_frames) {
+        LOG_WARNING(Audio, "Stretcher flush overran its stash by {} frames; dropped",
+                    expected - max_frames);
     }
     sound_touch->clear();
-    return got;
+
+    // Trim the silence the padding made, then the overlap blended into it. A trailing run
+    // of zeros the audio itself carried goes with them, which loses nothing audible.
+    std::size_t end = got;
+    while (end > 0 && out[(end - 1) * 2] == 0 && out[((end - 1) * 2) + 1] == 0) {
+        end--;
+    }
+    if (end < got) {
+        end = end > overlap ? end - overlap : 0;
+    }
+    return end;
+}
+
+std::size_t TimeStretcher::OverlapFrames() const {
+    return static_cast<std::size_t>(sound_touch->getSetting(SETTING_OVERLAP_MS)) *
+           static_cast<std::size_t>(native_sample_rate) / 1000;
+}
+
+std::size_t TimeStretcher::SeekFrames() const {
+    // The setting reads 0 while SoundTouch picks the window itself, 15 to 20 ms by tempo
+    // (TDStretch::calcSeqParameters(), externals/soundtouch); the widest covers every tempo.
+    static constexpr int kAutoSeekMaxMs = 20;
+    int ms = sound_touch->getSetting(SETTING_SEEKWINDOW_MS);
+    if (ms <= 0) {
+        ms = kAutoSeekMaxMs;
+    }
+    return static_cast<std::size_t>(ms) * static_cast<std::size_t>(native_sample_rate) / 1000;
 }
 
 std::size_t TimeStretcher::OutputBacklog() const {

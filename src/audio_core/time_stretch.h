@@ -64,10 +64,15 @@ public:
     void Feed(const s16* in, std::size_t num_in);
     /// Reads and drops up to `max_frames` of output. Returns the frames dropped.
     std::size_t Discard(std::size_t max_frames);
-    /// Flushes: pads SoundTouch until everything it was fed has come out, reads it all into
-    /// `out`, then clears. Returns the frames read; anything past `max_frames` is dropped with
-    /// a warning.
+    /// Flushes: pads SoundTouch with silence until everything it holds has come out, reads
+    /// that into `out` and trims the padding back off, then clears. Ends on clean audio, up
+    /// to one overlap short of what was fed; SoundTouch's own count is not used, since it
+    /// goes wrong across tempo steps. Returns the frames kept; anything past `max_frames` is
+    /// dropped with a warning.
     std::size_t FlushInto(s16* out, std::size_t max_frames);
+    /// One overlap, and one seek window, at the current settings, in frames.
+    std::size_t OverlapFrames() const;
+    std::size_t SeekFrames() const;
     /// Processed frames waiting to be read.
     std::size_t OutputBacklog() const;
     /// Frames fed but not yet processed.

@@ -130,7 +130,7 @@ TEST_CASE("TimeStretcher::Process keeps its input when nothing is asked for",
     REQUIRE(ts.InputResidency() >= 999);
 }
 
-TEST_CASE("TimeStretcher::FlushInto returns exactly what was fed at ratio 1",
+TEST_CASE("TimeStretcher::FlushInto returns what was fed, less at most an overlap, at ratio 1",
           "[audio_core][bypass]") {
     AudioCore::TimeStretcher ts;
     ts.SetRatioBounds(1.0, 1.0);
@@ -139,10 +139,36 @@ TEST_CASE("TimeStretcher::FlushInto returns exactly what was fed at ratio 1",
     const std::size_t first = ts.Process(in.data(), 4000, out.data(), kCallback);
     std::vector<s16> flushed(8192 * 2);
     const std::size_t rest = ts.FlushInto(flushed.data(), 8192);
-    REQUIRE(first + rest >= 3998);
-    REQUIRE(first + rest <= 4002);
+    // The last round starts anywhere within a seek window, as every round does, and the
+    // overlap it blends into the padding is trimmed.
+    REQUIRE(first + rest >= 4000 - ts.OverlapFrames() - ts.SeekFrames() - 16);
+    REQUIRE(first + rest <= 4000);
     REQUIRE(ts.OutputBacklog() == 0);
     REQUIRE(ts.InputResidency() == 0);
+}
+
+TEST_CASE("TimeStretcher::FlushInto keeps the residency across a tempo step",
+          "[audio_core][bypass]") {
+    // Fed at tempo 3 and flushed at tempo 1, SoundTouch's own flush() would expect a third of
+    // the residency and discard the rest; ours reads what the padding rounds produce.
+    AudioCore::TimeStretcher ts;
+    ts.SetRatioBounds(3.0, 3.0);
+    const auto in = Tone(0, 4000);
+    std::vector<s16> out(kCallback * 2);
+    ts.Process(in.data(), 4000, out.data(), kCallback);
+    const std::size_t residency = ts.InputResidency();
+    REQUIRE(residency > 1000);
+    ts.SetRatioBounds(1.0, 1.0);
+    ts.SetRatio(1.0);
+    const std::size_t backlog = ts.OutputBacklog();
+    std::vector<s16> flushed(8192 * 2);
+    const std::size_t rest = ts.FlushInto(flushed.data(), 8192);
+    // At tempo 1 the residency comes out frame for frame, less the seek window the first
+    // round starts within and the overlap trimmed off. SoundTouch's flush() would give a
+    // third of it.
+    REQUIRE(rest >= backlog + residency - ts.OverlapFrames() - ts.SeekFrames() - 16);
+    REQUIRE(rest <= backlog + residency);
+    REQUIRE(rest > (backlog + residency) / 2);
 }
 
 TEST_CASE("TimeStretcher::SetTargetBacklog steers the ratio toward the target",
