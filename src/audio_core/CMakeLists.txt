@@ -37,6 +37,7 @@ add_library(audio_core STATIC EXCLUDE_FROM_ALL
     static_input.cpp
     static_input.h
     stream_ramp.h
+    stretch_gate.h
     time_stretch.cpp
     time_stretch.h
 
