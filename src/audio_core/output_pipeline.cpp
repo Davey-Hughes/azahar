@@ -174,14 +174,17 @@ void OutputPipeline::RenderChunk(s16* out, std::size_t num_frames) {
                                                (kSpeedTimeConstant * native_sample_rate));
         speed_fast +=
             ((static_cast<double>(arrived) / static_cast<double>(num_frames)) - speed_fast) * alpha;
-        const std::size_t window =
-            std::clamp<std::size_t>(kSpeedWindowFrames / num_frames, 4, kSpeedWindowMax);
+        // The ring holds one entry per callback; the window is the most recent entries that
+        // together cover kSpeedWindowFrames, however large each callback was, so a sink that
+        // varies its callback size still gets a ratio over the same span of time.
         arrivals[speed_pos] = arrived;
         requests[speed_pos] = num_frames;
-        speed_pos = (speed_pos + 1) % window;
+        speed_pos = (speed_pos + 1) % kSpeedWindowMax;
         std::size_t arrival_sum = 0;
         std::size_t request_sum = 0;
-        for (std::size_t i = 0; i < window; i++) {
+        for (std::size_t back = 1; back <= kSpeedWindowMax && request_sum < kSpeedWindowFrames;
+             back++) {
+            const std::size_t i = (speed_pos + kSpeedWindowMax - back) % kSpeedWindowMax;
             arrival_sum += arrivals[i];
             request_sum += requests[i];
         }

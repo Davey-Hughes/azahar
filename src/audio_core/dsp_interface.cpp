@@ -95,9 +95,9 @@ void DspInterface::OutputSample(std::array<s16, 2> sample) {
 
 void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
     // A hint for the stretcher's servo, not a decision: the pipeline measures what arrives.
-    const u16 frame_limit = Settings::GetFrameLimit();
-    pipeline.SetRequestedSpeed(frame_limit == 0 ? std::numeric_limits<double>::infinity()
-                                                : static_cast<double>(frame_limit) / 100.0);
+    const double frame_limit = Settings::GetFrameLimit();
+    pipeline.SetRequestedSpeed(frame_limit <= 0.0 ? std::numeric_limits<double>::infinity()
+                                                  : frame_limit / 100.0);
     pipeline.Render(buffer, num_frames);
 
     // Implementation of the hardware volume slider

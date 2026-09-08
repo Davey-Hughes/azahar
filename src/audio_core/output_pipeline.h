@@ -139,7 +139,7 @@ private:
 
     static constexpr double kSpeedTimeConstant = 0.3;        // seconds, the fast estimate
     static constexpr std::size_t kSpeedWindowFrames = 65536; // ~2 s, the slow estimate
-    static constexpr std::size_t kSpeedWindowMax = 256;      // callbacks it can span
+    static constexpr std::size_t kSpeedWindowMax = 256;      // callbacks the ring holds
     static constexpr std::size_t kSpeedWindowSettle = 32768; // frames before it is trusted
     static constexpr double kStretchTargetBacklog = 0.125;   // seconds, master's servo target
     static constexpr double kStretchMinRatio = 0.05;
