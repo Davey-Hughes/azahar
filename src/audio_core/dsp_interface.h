@@ -4,7 +4,9 @@
 
 #pragma once
 
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <boost/serialization/access.hpp>
 #include "audio_core/audio_types.h"
@@ -110,6 +112,13 @@ public:
     /// The core is producing again: the next frames ramp back in. Any thread.
     void StreamBegin();
 
+    /// Bracket a jump the frontend makes in the game's state, a load or a reset, so the splice
+    /// lands in silence: takes the stream down and waits, bounded, for the tail to reach the
+    /// sink. Returns false and does nothing if the stream is already down, so the ramp back up
+    /// stays with whatever took it down. Emulation thread.
+    bool JumpBegin();
+    void JumpEnd(bool ramped);
+
 protected:
     void OutputFrame(StereoFrame16 frame);
     void OutputSample(std::array<s16, 2> sample);
@@ -132,6 +141,13 @@ private:
     // Audio thread only; core_silenced is how the other threads reach it.
     StreamRamp ramp;
     std::atomic<bool> core_silenced{false};
+    // Whether the last callback found the stream settled: down, with its tail fully out. What
+    // JumpBegin() waits on, since it cannot read the ramp from its own thread. A fresh stream
+    // is settled, having nothing to take down. The audio thread signals the condition variable
+    // on the rising edge alone; the mutex is the waiter's, and the callback never takes it.
+    std::atomic<bool> stream_settled{true};
+    std::mutex settled_mutex;
+    std::condition_variable settled_cv;
     std::unique_ptr<Sink> sink;
 
     template <class Archive>
