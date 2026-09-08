@@ -113,8 +113,11 @@ public:
     /// every tempo step it took with input resident. Finds where the second stream best
     /// continues the first's last kCorrFrames, cross-fades the first's last kJoinFrames into
     /// the frames before that point, and drops what lies between, so the join is phase
-    /// continuous. Returns the frames dropped; 0, with the stash untouched, when either side
-    /// is too short to search, or the first stream ends in silence and any junction will do.
+    /// continuous. At least kCorrFrames are dropped, since the match is scored on the frames
+    /// before the candidate, which must lie in the second stream. Returns the frames dropped;
+    /// 0, with the stash untouched, when either side is too short to search, or the first
+    /// stream ends in silence (scored on the channel sum, so antiphase stereo counts) and any
+    /// junction will do.
     std::size_t JoinFlush(FrameStash& stash, std::size_t boundary) {
         const std::size_t avail = stash.Size();
         if (boundary < kJoinFrames || avail < boundary + kCorrFrames + kMinPeriod) {

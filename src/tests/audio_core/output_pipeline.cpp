@@ -33,6 +33,10 @@ constexpr double kFramesPerBurst = kFs / 60.0; // one video frame of audio, 545.
 constexpr std::size_t kKey = 8;
 /// A seek window plus an overlap of SoundTouch jitter at a seam, rounded up: ~900 frames.
 constexpr long kSeamBound = 900;
+/// What the flush's count can be off by where the flushed frames meet the FIFO's: the seek
+/// jitter plus the error every tempo step leaves behind, ~810 frames after a fast-forward
+/// release. The join drops whatever it drops on top of that.
+constexpr long kFlushBound = 1300;
 
 /// Source frame i: a hash of its index on both channels.
 s16 Src(std::size_t i) {
@@ -212,10 +216,12 @@ void RequireFilled(const Run& run, std::size_t first, std::size_t last) {
 /// In Bypass and Warming, consecutive located frames advance by one, except across the one
 /// splice a callback may carry, where the jump is the splice's size in its direction. The
 /// first located frame after a Sync or a Handover is a seam, allowed kSeamBound either way.
-/// Between a Handover and the join that ends its flushed run, the frames are the stretcher's
-/// own output and may carry its round jitter, again within kSeamBound; the join callback
-/// must show exactly one jump matching what it dropped, within kSeamBound, under a blended
-/// gap of at least kJoinFrames. Stretch and Drain output is WSOLA and is not checked.
+/// From a Handover to the frame where its flushed run ends, the frames are the stretcher's
+/// own output and may carry its round jitter, again within kSeamBound; across that frame
+/// the jump is what the join dropped plus the flush's count error, within kFlushBound,
+/// under a blended gap of at least kJoinFrames (or, when the join could not be made and a
+/// fade stood in, the count error alone under the fade). Stretch and Drain output is WSOLA
+/// and is not checked.
 ///
 /// A callback the source could not fill, or that the core had silenced, carries the ramp's
 /// synthesized tail, whose repeat of recent audio can locate; the tail can run on into the
@@ -224,15 +230,20 @@ void RequireFilled(const Run& run, std::size_t first, std::size_t last) {
 /// callbacks.
 ///
 /// So that a pipeline emitting silence or garbage cannot pass by locating nothing: a raw
-/// callback must locate at least 95% of its frames, 70% when it carries a splice or a join
-/// (128 blended frames), 40% when it carries an edge (a 256-frame cross-fade), and every
-/// seam callback must locate at least one frame.
+/// callback must locate at least 95% of its frames, 65% when it carries a splice or a join
+/// (128 blended frames, the seven-frame key tails around them, and a callback boundary's),
+/// 40% when it carries an edge (a 256-frame cross-fade) or follows a join, and every seam
+/// callback must locate at least one frame.
 void CheckTimeline(const Run& run, const SourceIndex& index, std::size_t first_callback) {
     const std::size_t total = run.out.size() / 2;
     std::optional<std::size_t> last_j;
     std::optional<std::size_t> last_p;
     std::size_t skip_until = 0;
     bool in_flush = false;
+    std::optional<std::size_t> flush_end; // output frame where the flushed run ends
+    std::size_t flush_joined = 0;         // what the join dropped there, 0 for a fade
+    bool flush_seam_seen = false;
+    std::size_t last_join = 0;
     for (std::size_t c = first_callback; c < run.callbacks.size(); c++) {
         const auto& cb = run.callbacks[c];
         if (cb.stats.silenced || cb.stats.written < kCallback) {
@@ -243,9 +254,20 @@ void CheckTimeline(const Run& run, const SourceIndex& index, std::size_t first_c
         }
         if (cb.stats.edge == Edge::Handover) {
             in_flush = true;
+            flush_end.reset();
+            flush_seam_seen = false;
+        }
+        if (cb.stats.edge == Edge::Engage || cb.stats.edge == Edge::Abort) {
+            // The stash, flushed frames and all, went into the stretcher (or plays on raw).
+            in_flush = false;
+            flush_end.reset();
+        }
+        if (cb.stats.join_at > 0) {
+            flush_end = (c * kCallback) + cb.stats.join_at;
+            flush_joined = cb.stats.joined;
+            last_join = c;
         }
         const bool raw = cb.mode == Mode::Bypass || cb.mode == Mode::Warming;
-        const bool join = cb.stats.joined > 0;
         bool seam = cb.stats.edge == Edge::Sync || cb.stats.edge == Edge::Handover;
         long allowed = 0;
         if (cb.stats.cut > 0) {
@@ -255,7 +277,6 @@ void CheckTimeline(const Run& run, const SourceIndex& index, std::size_t first_c
             allowed = -static_cast<long>(cb.stats.inserted);
         }
         bool jumped = false;
-        std::size_t join_jumps = 0;
         std::size_t located = 0;
         for (std::size_t j = c * kCallback; j < (c + 1) * kCallback && j + kKey <= total; j++) {
             const auto p = index.Locate(&run.out[j * 2]);
@@ -266,16 +287,23 @@ void CheckTimeline(const Run& run, const SourceIndex& index, std::size_t first_c
             if (last_j) {
                 const long gap = static_cast<long>(j - *last_j);
                 const long jump = static_cast<long>(*p) - static_cast<long>(*last_p) - gap;
+                // The blend's last few frames are within a bit of their target and locate, so
+                // the jump shows anywhere from inside the blend's tail on; the frame before it
+                // must precede the blend.
+                const bool across_flush_end = in_flush && flush_end &&
+                                              *last_j + PeriodSplicer::kJoinFrames < *flush_end &&
+                                              j + PeriodSplicer::kJoinFrames > *flush_end;
                 INFO("callback " << c << " at " << Run::TimeOf(c) << " s, frame " << j << ", jump "
                                  << jump << ", gap " << gap);
                 if (seam) {
                     REQUIRE(std::abs(jump) <= kSeamBound);
                     seam = false;
-                } else if (join && jump != 0 &&
-                           std::abs(jump - static_cast<long>(cb.stats.joined)) <= kSeamBound) {
-                    REQUIRE(gap >= static_cast<long>(PeriodSplicer::kJoinFrames));
-                    join_jumps++;
-                } else if (raw && (in_flush || join)) {
+                } else if (across_flush_end) {
+                    REQUIRE(std::abs(jump - static_cast<long>(flush_joined)) <= kFlushBound);
+                    REQUIRE(gap >= static_cast<long>(PeriodSplicer::kJoinFrames) - 16);
+                    flush_seam_seen = true;
+                    in_flush = false;
+                } else if (raw && in_flush) {
                     REQUIRE(std::abs(jump) <= kSeamBound);
                 } else if (raw && jump != 0) {
                     REQUIRE(jump == allowed);
@@ -288,19 +316,23 @@ void CheckTimeline(const Run& run, const SourceIndex& index, std::size_t first_c
         }
         INFO("callback " << c << " at " << Run::TimeOf(c) << " s located " << located << " of "
                          << kCallback);
-        if (join) {
-            REQUIRE(join_jumps == 1);
-            in_flush = false;
+        if (flush_end && c > (*flush_end / kCallback) + 1 && !flush_seam_seen) {
+            FAIL("the flushed run ending at frame " << *flush_end << " never showed its seam");
         }
         if (cb.stats.edge == Edge::Sync || cb.stats.edge == Edge::Handover) {
             REQUIRE(located >= 1);
         }
         if (raw && !in_flush && c >= skip_until) {
-            const bool spliced = cb.stats.cut > 0 || cb.stats.inserted > 0 || join;
-            const double threshold = cb.stats.edge != Edge::None ? 0.40 : spliced ? 0.70 : 0.95;
+            const bool spliced = cb.stats.cut > 0 || cb.stats.inserted > 0 || cb.stats.join_at > 0;
+            // A join's blend can straddle into the callback after it, on top of a cut there.
+            const bool wide = cb.stats.edge != Edge::None || (last_join > 0 && c == last_join + 1);
+            const double threshold = wide ? 0.40 : spliced ? 0.65 : 0.95;
             REQUIRE(static_cast<double>(located) >= threshold * static_cast<double>(kCallback));
         }
     }
+    // A flushed run that never met its end would have switched the strict checks off for the
+    // rest of the run; the scenario must be long enough to see it.
+    REQUIRE(!in_flush);
 }
 
 double Steady(double) {
@@ -357,7 +389,7 @@ TEST_CASE("OutputPipeline plays a full-speed stream straight through", "[audio_c
 
 TEST_CASE("OutputPipeline stretches through a slowdown and hands back", "[audio_core][bypass]") {
     auto pipeline = Fresh();
-    const Run run = Simulate(*pipeline, 16.0, Dip);
+    const Run run = Simulate(*pipeline, 26.0, Dip);
     const SourceIndex index(run.pushed);
 
     const std::size_t first = run.FirstFilled();
@@ -373,9 +405,11 @@ TEST_CASE("OutputPipeline stretches through a slowdown and hands back", "[audio_
     REQUIRE(sync > engage);
     REQUIRE(Run::TimeOf(sync) - Run::TimeOf(engage) < 0.5);
     REQUIRE(run.callbacks[sync].stats.replayed == 0);
+    // The dip's four seconds must age out of the ten-second window before the two-second
+    // dwell can start: about 18 s, then a second of drain.
     REQUIRE(handover > sync);
-    REQUIRE(Run::TimeOf(handover) > 10.0);
-    REQUIRE(Run::TimeOf(handover) < 14.0);
+    REQUIRE(Run::TimeOf(handover) > 18.0);
+    REQUIRE(Run::TimeOf(handover) < 25.0);
     REQUIRE(run.CountEdges(Edge::Engage) == 1);
     REQUIRE(run.CountEdges(Edge::Handover) == 1);
     REQUIRE(run.callbacks.back().mode == Mode::Bypass);
@@ -383,11 +417,13 @@ TEST_CASE("OutputPipeline stretches through a slowdown and hands back", "[audio_
     CheckTimeline(run, index, first + 2);
 
     // Within a second of the handover the excess is trimmed to the target plus the slack the
-    // splicer leaves, under a period over that, and the raw path never runs dry.
+    // splicer leaves, under a period over that, and the raw path never runs dry. The beat's
+    // step, a burst less a callback, is how far one cycle's floor can sit above the last.
     const std::size_t target = pipeline->FillTarget(kCallback);
     const std::size_t low = run.LowWater(handover + 64, handover + 80);
+    const auto beat_step = static_cast<std::size_t>(kFramesPerBurst) - kCallback;
     REQUIRE(low >= kCallback);
-    REQUIRE(low < target + OutputPipeline::kTrimSlack + PeriodSplicer::kMinPeriod);
+    REQUIRE(low < target + OutputPipeline::kTrimSlack + PeriodSplicer::kMinPeriod + beat_step);
 }
 
 TEST_CASE("OutputPipeline stays stretched while speed hovers below full", "[audio_core][bypass]") {
@@ -404,7 +440,7 @@ TEST_CASE("OutputPipeline stays stretched while speed hovers below full", "[audi
 
 TEST_CASE("OutputPipeline stretches through fast-forward and hands back", "[audio_core][bypass]") {
     auto pipeline = Fresh();
-    const Run run = Simulate(*pipeline, 16.0, FastForward, [](double t, OutputPipeline& p) {
+    const Run run = Simulate(*pipeline, 26.0, FastForward, [](double t, OutputPipeline& p) {
         // The frontend's frame limit follows the scripted speed.
         p.SetRequestedSpeed(FastForward(t));
     });
@@ -423,8 +459,8 @@ TEST_CASE("OutputPipeline stretches through fast-forward and hands back", "[audi
     REQUIRE(Run::TimeOf(engage) >= 3.0);
     REQUIRE(Run::TimeOf(engage) < 3.6);
     REQUIRE(run.callbacks[sync].stats.replayed == 0);
-    REQUIRE(Run::TimeOf(handover) > 10.0);
-    REQUIRE(Run::TimeOf(handover) < 14.0);
+    REQUIRE(Run::TimeOf(handover) > 18.0);
+    REQUIRE(Run::TimeOf(handover) < 25.0);
     REQUIRE(run.callbacks.back().mode == Mode::Bypass);
     CheckTimeline(run, index, first + 2);
 }
@@ -497,7 +533,12 @@ TEST_CASE("OutputPipeline resumes a warm-up across a pause without replaying",
     REQUIRE(sync < run.callbacks.size());
     REQUIRE(Run::TimeOf(engage) < 4.45);
     REQUIRE(Run::TimeOf(sync) >= 4.95);
+    // A natural sync, not the one-second timeout: the pause is frozen time, not warm-up time.
+    REQUIRE(Run::TimeOf(sync) - Run::TimeOf(engage) < 1.5);
     REQUIRE(run.callbacks[sync].stats.replayed == 0);
+    // The replay this guards against shows as a Sync seam jumping back by the stash's size,
+    // which CheckTimeline's seam bound catches; `replayed` alone would not, since an
+    // undercounted discard is still fully served.
     // Full up to the pause; after it the warm-up refills on the ramp before it plays, so
     // the requirement resumes at the switch.
     RequireFilled(run, run.FirstFilled(), run.FirstSilenced());

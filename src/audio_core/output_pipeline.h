@@ -32,8 +32,8 @@ namespace AudioCore {
 /// PeriodSplicer::Insert(), so it falls behind real time, while every frame pulled is also fed
 /// to the stretcher; once the stretcher's output covers the raw play point, Sync discards up to
 /// that point and Stretch reads from the stretcher, as master did. Drain lowers the stretcher's
-/// target at a bounded tempo, and Handover flushes it exactly into the stash, where the cut
-/// trims the excess away.
+/// target at a bounded tempo, and Handover flushes it into the stash, where PeriodSplicer::
+/// JoinFlush() closes the seam at the flush's end and trims the excess with it.
 class OutputPipeline {
 public:
     /// The most a single Render() serves at once; a sink asking for more is served in pieces.
@@ -52,6 +52,8 @@ public:
         std::size_t inserted = 0; // frames the splicer repeated
         std::size_t flushed = 0;  // frames the stretcher handed to the stash at Handover
         std::size_t joined = 0;   // frames dropped where the flushed frames met the FIFO's
+        std::size_t join_at = 0;  // output frame in this callback where the flushed run ended,
+                                  // 0 for none; the join's blend is the kJoinFrames before it
         std::size_t replayed = 0; // frames of stretcher output a forced Sync could not skip
         bool silenced = false;    // the core had the stream down; nothing was rendered
         std::size_t depth = 0;    // fifo + stash at the start of the callback
@@ -95,6 +97,11 @@ public:
     /// audio plus one callback. One burst is what a late burst costs, the second is the slack
     /// a slowdown is detected within.
     std::size_t FillTarget(std::size_t num_frames) const;
+    /// What Drain leaves in the stretcher for the handover: at least the prefill target, so
+    /// the beat's trough stays above the engage depth once it is in the stash, and at most
+    /// what a settled drain holds, so the handover is not taken mid-drain.
+    std::size_t HandoverLow(std::size_t num_frames) const;
+    std::size_t HandoverHigh(std::size_t num_frames) const;
     /// Below this depth Bypass engages the stretcher: one callback plus half a burst, so an
     /// engage on a real slowdown still has a callback in hand, while a burst arriving late at
     /// the trough of a healthy stream stays above it.
@@ -136,12 +143,18 @@ private:
     void DiscardPending();
     std::size_t WarmDiscardNeeded() const;
     std::size_t Excess(std::size_t num_frames) const;
-    void ArmHandoverFade();
-    void ApplyHandoverFade(s16* buffer, std::size_t num_frames);
+    void ArmSeamFade();
+    /// Arms the fade to begin `offset` frames into the output that follows, from the level
+    /// there rather than the last frame handed on.
+    void ArmSeamFadeAt(std::size_t offset);
+    void ApplySeamFade(s16* buffer, std::size_t num_frames);
 
-    static constexpr double kSpeedTimeConstant = 0.3;        // seconds, the fast estimate
-    static constexpr std::size_t kSpeedWindowFrames = 65536; // ~2 s, the slow estimate
-    static constexpr std::size_t kSpeedWindowMax = 256;      // callbacks the ring holds
+    static constexpr double kSpeedTimeConstant = 0.3; // seconds, the fast estimate
+    // The slow estimate's window. Its precision is one burst over its length, since a burst
+    // either lands inside the window or not: ten seconds gives 0.17%, enough to tell a host
+    // at 99.5%, which Bypass cannot serve, from one at full speed. Two seconds could not.
+    static constexpr std::size_t kSpeedWindowFrames = 327680;
+    static constexpr std::size_t kSpeedWindowMax = 4096;     // callbacks the ring holds
     static constexpr std::size_t kSpeedWindowSettle = 32768; // frames before it is trusted
     static constexpr double kStretchTargetBacklog = 0.125;   // seconds, master's servo target
     static constexpr double kStretchMinRatio = 0.05;
@@ -178,6 +191,7 @@ private:
     // seconds, within a percent of the truth at any callback size, and `speed_fast` a short
     // EMA that answers in a tenth of a second but dips to ~0.95 on every burst gap.
     double speed = 1.0;
+    bool speed_settled = false;
     double speed_fast = 1.0;
     std::array<std::size_t, kSpeedWindowMax> arrivals{};
     std::array<std::size_t, kSpeedWindowMax> requests{};
@@ -186,12 +200,11 @@ private:
     // Bypass emits nothing until the buffer first reaches the fill target: at reset, and after
     // each silence.
     bool prefilling = true;
-    // Depth at the start of each of the last kLowWaterWindow callbacks, and what the splicer
-    // cut in each: excess is judged on the window's minimum less those cuts, since arrivals
-    // come a burst at a time and an instantaneous depth would trigger cuts at the right
-    // average depth.
+    // Depth at the start of each of the last kLowWaterWindow callbacks: excess is judged on
+    // the window's minimum, since arrivals come a burst at a time and an instantaneous depth
+    // would trigger cuts at the right average depth. Each cut lowers every entry by what it
+    // removed, so the minimum stays what the trough would be now rather than what it was.
     std::array<std::size_t, kLowWaterWindow> depth_window{};
-    std::array<std::size_t, kLowWaterWindow> cut_window{};
     std::size_t window_pos = 0;
     // Flushed frames still at the front of the stash after a Handover. They continue the
     // stretcher's output exactly; the seam is where they run out and the FIFO's frames take
@@ -204,15 +217,17 @@ private:
     s64 warm_lag = 0;
     RenderStats last{};
 
-    // Cross-fade across a handover, in output frames. Kept short: both sides are the same
-    // material at different points, so a long overlap is heard for itself. The gain at its
-    // midpoint: lower attenuates the discontinuity the handover carries, at the cost of a
-    // deeper notch. Audio thread only.
+    // Cross-fade across a seam, in output frames: the Sync switch, and a flush's end when the
+    // matched join could not be made. Kept short: both sides are the same material at
+    // different points, so a long overlap is heard for itself. The gain at its midpoint:
+    // lower attenuates the discontinuity the seam carries, at the cost of a deeper notch.
+    // Audio thread only.
     static constexpr unsigned kHandoverFadeFrames = 256;
     static constexpr float kHandoverDipGain = 0.15f;
     unsigned fade_out_frames = 0;
+    std::size_t fade_delay = 0;
     std::array<float, 2> fade_out_from{};
-    // Last frame handed on before the volume, normalized: the level a handover fades from.
+    // Last frame handed on before the volume, normalized: the level a seam fades from.
     std::array<float, 2> fade_last_out{};
 
     // Ends the stream on a ramp and brings it back on one, on the last buffer before the sink.
