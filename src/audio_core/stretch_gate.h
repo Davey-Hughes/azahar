@@ -33,8 +33,9 @@ public:
         double speed_fast;         // the same over ~0.3 s: quicker, but it dips on burst gaps
         std::size_t buffered;      // fifo + stash, frames, at the start of the callback
         std::size_t low_water;     // Bypass engages below this depth, once prefilled
-        std::size_t stretched;     // frames inside the stretcher, input and output together
-        std::size_t handover_low;  // Drain hands over with at least this much inside...
+        std::size_t stretched;     // what a flush now would put in the stash: the frames
+                                   // inside, input and output, less what a flush falls short
+        std::size_t handover_low;  // Drain hands over with at least this much to flush...
         std::size_t handover_high; // ...and at most this much, unless the drain was forced
         double ratio;              // stretcher ratio
         bool enabled;              // enable_audio_stretching

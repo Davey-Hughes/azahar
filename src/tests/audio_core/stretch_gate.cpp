@@ -191,7 +191,7 @@ TEST_CASE("StretchGate drains after two seconds in band with the ratio near one"
     }
 }
 
-TEST_CASE("StretchGate hands over when the drained backlog fits a callback",
+TEST_CASE("StretchGate hands over when the flush would land within the band",
           "[audio_core][bypass]") {
     StretchGate gate = Stretching();
     Repeat(gate, In(1.0), 128);

@@ -208,13 +208,29 @@ TEST_CASE("PeriodSplicer::Insert falls back to a plain copy", "[audio_core][bypa
     REQUIRE(r.spliced == 0);
     REQUIRE(r.written == 300);
     REQUIRE(r.consumed == 300);
+}
 
+TEST_CASE("PeriodSplicer::Insert in silence inserts silence", "[audio_core][bypass]") {
+    // No period to repeat, but repeating silence costs nothing and slows the raw path so a
+    // warm-up in silence can still be overtaken: as much of the silent lead as the join
+    // would have needed room for.
+    AudioCore::PeriodSplicer splicer;
+    std::vector<s16> out(kCallback * 2, 1);
     const std::vector<s16> silence(4000 * 2, 0);
     auto silent = Filled(silence);
     const auto s = splicer.Insert(out.data(), kCallback, silent);
-    REQUIRE(s.spliced == 0);
     REQUIRE(s.written == kCallback);
-    REQUIRE(s.consumed == kCallback);
+    REQUIRE(s.spliced == kCallback - AudioCore::PeriodSplicer::kJoinFrames);
+    REQUIRE(s.consumed == kCallback - s.spliced);
+    REQUIRE(std::all_of(out.begin(), out.end(), [](s16 v) { return v == 0; }));
+
+    // A silent lead shorter than a period is not worth a splice.
+    std::vector<s16> onset = Sine(2000);
+    onset.insert(onset.begin(), 2 * 40, 0);
+    auto soon = Filled(onset);
+    const auto r = splicer.Insert(out.data(), kCallback, soon);
+    REQUIRE(r.written == kCallback);
+    REQUIRE(r.spliced != kCallback - AudioCore::PeriodSplicer::kJoinFrames);
 }
 
 TEST_CASE("PeriodSplicer::Insert on noise repeats a period that fits the join",

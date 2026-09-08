@@ -21,7 +21,7 @@ namespace {
 constexpr double kBacklogCapSeconds = 1.0;
 } // namespace
 
-static_assert(std::is_floating_point_v<soundtouch::SAMPLETYPE> ||
+static_assert(std::is_same_v<soundtouch::SAMPLETYPE, float> ||
               std::is_same_v<soundtouch::SAMPLETYPE, s16>);
 
 TimeStretcher::TimeStretcher() : sound_touch(std::make_unique<soundtouch::SoundTouch>()) {
@@ -48,13 +48,16 @@ std::size_t TimeStretcher::Put(const s16* in, std::size_t num_in) {
     }
     if constexpr (std::is_floating_point_v<soundtouch::SAMPLETYPE>) {
         // The SoundTouch library on most systems expects float samples in -1..1; conventional
-        // integer PCM uses -32768..32767, so scale on the way in.
-        std::vector<soundtouch::SAMPLETYPE> float_in(2 * num_in);
-        for (std::size_t i = 0; i < (2 * num_in); i++) {
-            float_in[i] = static_cast<soundtouch::SAMPLETYPE>(static_cast<float>(in[i]) /
-                                                              std::numeric_limits<s16>::max());
+        // integer PCM uses -32768..32767, so scale on the way in. The scratch grows to the
+        // largest put and stays, so the audio thread stops allocating once it has.
+        if (put_scratch.size() < 2 * num_in) {
+            put_scratch.resize(2 * num_in);
         }
-        sound_touch->putSamples(float_in.data(), static_cast<u32>(num_in));
+        for (std::size_t i = 0; i < (2 * num_in); i++) {
+            put_scratch[i] = static_cast<float>(in[i]) / std::numeric_limits<s16>::max();
+        }
+        sound_touch->putSamples(reinterpret_cast<const soundtouch::SAMPLETYPE*>(put_scratch.data()),
+                                static_cast<u32>(num_in));
     } else {
         sound_touch->putSamples(reinterpret_cast<const soundtouch::SAMPLETYPE*>(in),
                                 static_cast<u32>(num_in));
@@ -127,10 +130,6 @@ std::size_t TimeStretcher::Process(const s16* in, std::size_t num_in, s16* out,
 
 void TimeStretcher::Clear() {
     sound_touch->clear();
-}
-
-void TimeStretcher::Flush() {
-    sound_touch->flush();
 }
 
 void TimeStretcher::SetTargetBacklog(double seconds) {
@@ -218,13 +217,19 @@ std::size_t TimeStretcher::FlushInto(s16* out, std::size_t max_frames) {
     }
     sound_touch->clear();
 
-    // Trim the silence the padding made, then the overlap blended into it. A trailing run
-    // of zeros the audio itself carried goes with them, which loses nothing audible.
+    // Trim the silence the padding made, then the overlap blended into it. Only zeros the
+    // padding could have made: the residency counts the last round's overlap and offset,
+    // which are already out, so the audio cannot end before `expected` less an overlap and
+    // a seek window, and a run of zeros reaching that floor is the audio's own silence,
+    // kept in full. A game silent on a load screen buffers time in that silence, and a
+    // flush that dropped it would hand Bypass an empty stash, which re-engages on the next
+    // callback.
+    const std::size_t floor = expected > seek + overlap ? expected - seek - overlap : 0;
     std::size_t end = got;
-    while (end > 0 && out[(end - 1) * 2] == 0 && out[((end - 1) * 2) + 1] == 0) {
+    while (end > floor && out[(end - 1) * 2] == 0 && out[((end - 1) * 2) + 1] == 0) {
         end--;
     }
-    if (end < got) {
+    if (end < got && end > floor) {
         end = end > overlap ? end - overlap : 0;
     }
     return end;
@@ -235,9 +240,14 @@ std::size_t TimeStretcher::OverlapFrames() const {
            static_cast<std::size_t>(native_sample_rate) / 1000;
 }
 
+std::size_t TimeStretcher::FlushShortfall() const {
+    return SeekFrames() + OverlapFrames();
+}
+
 std::size_t TimeStretcher::SeekFrames() const {
     // The setting reads 0 while SoundTouch picks the window itself, 15 to 20 ms by tempo
-    // (TDStretch::calcSeqParameters(), externals/soundtouch); the widest covers every tempo.
+    // (TDStretch::calcSeqParameters(), externals/soundtouch/source/SoundTouch/TDStretch.cpp);
+    // the widest covers every tempo.
     static constexpr int kAutoSeekMaxMs = 20;
     int ms = sound_touch->getSetting(SETTING_SEEKWINDOW_MS);
     if (ms <= 0) {

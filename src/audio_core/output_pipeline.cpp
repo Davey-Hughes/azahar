@@ -71,6 +71,8 @@ void OutputPipeline::Reset() {
     warm_raw_pos = 0;
     warm_lag = 0;
     flush_left = 0;
+    trim_credit = 0;
+    speed_entries = 0;
     time_stretcher.SetRatio(1.0);
     last = {};
     fade_out_frames = 0;
@@ -149,11 +151,10 @@ std::size_t OutputPipeline::HandoverLow(std::size_t num_frames) const {
 }
 
 std::size_t OutputPipeline::HandoverHigh(std::size_t num_frames) const {
-    // Where a drain settles: its backlog target of a round plus a callback, and about a
-    // round of input residency, with a callback of headroom. The flush then brings some
-    // 150 ms with it, which the splicer trims over the following second, one period per
-    // callback: a WSOLA-style time compression of a few percent, not a skip.
-    return (2 * time_stretcher.OutputBatchFrames()) + (2 * num_frames);
+    // One output batch over the prefill target: the excess the flush brings, which the
+    // splicer trims at kTrimRate, a WSOLA-style time compression for under a second rather
+    // than a skip. Lower would wait on the drain's residency cycling through its trough.
+    return PrefillTarget(num_frames) + time_stretcher.OutputBatchFrames();
 }
 
 std::size_t OutputPipeline::EngageDepth(std::size_t num_frames) const {
@@ -201,6 +202,7 @@ void OutputPipeline::RenderChunk(s16* out, std::size_t num_frames) {
         arrivals[speed_pos] = arrived;
         requests[speed_pos] = num_frames;
         speed_pos = (speed_pos + 1) % kSpeedWindowMax;
+        speed_entries = std::min(speed_entries + 1, kSpeedWindowMax);
         std::size_t arrival_sum = 0;
         std::size_t request_sum = 0;
         for (std::size_t back = 1; back <= kSpeedWindowMax && request_sum < kSpeedWindowFrames;
@@ -212,7 +214,8 @@ void OutputPipeline::RenderChunk(s16* out, std::size_t num_frames) {
         speed = request_sum >= kSpeedWindowSettle
                     ? static_cast<double>(arrival_sum) / static_cast<double>(request_sum)
                     : 1.0;
-        speed_settled = request_sum >= kSpeedWindowFrames;
+        speed_settled = request_sum >= kSpeedWindowFrames ||
+                        (speed_entries == kSpeedWindowMax && request_sum >= kSpeedWindowSettle);
     }
 
     const StretchGate::Mode before = gate.CurrentMode();
@@ -228,7 +231,7 @@ void OutputPipeline::RenderChunk(s16* out, std::size_t num_frames) {
         .speed_fast = speed_fast,
         .buffered = depth,
         .low_water = EngageDepth(num_frames),
-        .stretched = time_stretcher.OutputBacklog() + time_stretcher.InputResidency(),
+        .stretched = FlushYield(),
         .handover_low = HandoverLow(num_frames),
         .handover_high = HandoverHigh(num_frames),
         .ratio = time_stretcher.Ratio(),
@@ -355,16 +358,20 @@ std::size_t OutputPipeline::RenderBypass(s16* out, std::size_t num_frames, Rende
             if (stats.joined == 0) {
                 // Too little on one side to match, or a flush that ended in silence: the seam
                 // stays where it is, under a fade centered on it.
-                const std::size_t half = kHandoverFadeFrames / 2;
-                ArmSeamFadeAt(flush_left > half ? flush_left - half : 0);
+                const std::size_t half = kSeamFadeFrames / 2;
+                ArmSeamFade(flush_left > half ? flush_left - half : 0);
             }
             flush_left = 0;
         }
     } else {
         const std::size_t excess = Excess(num_frames);
-        budget = excess > kTrimSlack ? excess - kTrimSlack : 0;
+        trim_credit = std::min<std::size_t>(
+            trim_credit + static_cast<std::size_t>(kTrimRate * static_cast<double>(num_frames)),
+            PeriodSplicer::kMaxPeriod);
+        budget = std::min(excess > kTrimSlack ? excess - kTrimSlack : 0, trim_credit);
     }
     const auto r = splicer.Cut(out, num_frames, stash, budget);
+    trim_credit -= std::min(trim_credit, r.spliced);
     if (flush_left > 0) {
         flush_left -= std::min(flush_left, r.consumed);
     }
@@ -439,6 +446,7 @@ void OutputPipeline::Engage() {
     // Whatever flushed frames were still playing out went into the stretcher with the rest
     // of the stash; there is no seam left to close in Bypass.
     flush_left = 0;
+    trim_credit = 0;
     // The stash is ahead of the history and belongs to the stretcher next; the raw path plays
     // on from it meanwhile.
     if (stash.Size() > 0) {
@@ -474,6 +482,7 @@ void OutputPipeline::Handover(RenderStats& stats) {
     // The flush continues the stretcher's output exactly; the seam comes when it runs out.
     flush_left = stats.flushed;
     prefilling = false;
+    trim_credit = 0;
     LOG_DEBUG(Audio, "stretcher handed over {} frames", stats.flushed);
 }
 
@@ -505,6 +514,12 @@ void OutputPipeline::DiscardPending() {
     stash.Clear();
 }
 
+std::size_t OutputPipeline::FlushYield() const {
+    const std::size_t inside = time_stretcher.OutputBacklog() + time_stretcher.InputResidency();
+    const std::size_t short_by = time_stretcher.FlushShortfall();
+    return inside > short_by ? inside - short_by : 0;
+}
+
 std::size_t OutputPipeline::Excess(std::size_t num_frames) const {
     std::size_t low_water = std::numeric_limits<std::size_t>::max();
     for (std::size_t i = 0; i < kLowWaterWindow; i++) {
@@ -514,22 +529,16 @@ std::size_t OutputPipeline::Excess(std::size_t num_frames) const {
     return low_water > fill_floor ? low_water - fill_floor : 0;
 }
 
-void OutputPipeline::ArmSeamFade() {
+void OutputPipeline::ArmSeamFade(std::size_t offset) {
     // Neither side of a seam continues the other exactly, so dip through a short equal-power
     // cross-fade from the level the stream stopped at rather than splice. Not re-armed
-    // mid-fade: the edge can arrive twice in quick succession.
+    // mid-fade: the edge can arrive twice in quick succession. A delayed fade takes its
+    // level from the frame before it when it starts; this one stands until then.
     if (fade_out_frames != 0) {
         return;
     }
-    fade_out_frames = kHandoverFadeFrames;
+    fade_out_frames = kSeamFadeFrames;
     fade_out_from = fade_last_out;
-}
-
-void OutputPipeline::ArmSeamFadeAt(std::size_t offset) {
-    if (fade_out_frames != 0) {
-        return;
-    }
-    fade_out_frames = kHandoverFadeFrames;
     fade_delay = offset;
 }
 
@@ -556,16 +565,16 @@ void OutputPipeline::ApplySeamFade(s16* buffer, std::size_t num_frames) {
 
     const std::size_t n = std::min<std::size_t>(fade_out_frames, num_frames);
     for (std::size_t j = 0; j < n; j++) {
-        const unsigned done = kHandoverFadeFrames - fade_out_frames + static_cast<unsigned>(j) + 1;
+        const unsigned done = kSeamFadeFrames - fade_out_frames + static_cast<unsigned>(j) + 1;
         // Smoothstep the progress so the gain leaves and arrives with zero slope; a step in
         // rate of change is heard as a blip at each end of the window.
-        const float u = static_cast<float>(done) / kHandoverFadeFrames;
+        const float u = static_cast<float>(done) / kSeamFadeFrames;
         const float th = 0.5f * std::numbers::pi_v<float> * (u * u * (3.0f - 2.0f * u));
         const float g = std::cos(th);
         const float gn = std::sin(th);
-        const float env = 1.0f - (1.0f - kHandoverDipGain) *
-                                     std::sin(std::numbers::pi_v<float> * static_cast<float>(done) /
-                                              kHandoverFadeFrames);
+        const float env =
+            1.0f - (1.0f - kSeamDipGain) * std::sin(std::numbers::pi_v<float> *
+                                                    static_cast<float>(done) / kSeamFadeFrames);
         for (std::size_t ch = 0; ch < 2; ch++) {
             const float in = buffer[(j * 2) + ch] / 32768.0f;
             buffer[(j * 2) + ch] = ToSample(((fade_out_from[ch] * g) + (in * gn)) * env);

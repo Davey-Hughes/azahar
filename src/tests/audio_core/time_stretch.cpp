@@ -171,6 +171,29 @@ TEST_CASE("TimeStretcher::FlushInto keeps the residency across a tempo step",
     REQUIRE(rest > (backlog + residency) / 2);
 }
 
+TEST_CASE("TimeStretcher::FlushInto keeps the audio's own trailing silence",
+          "[audio_core][bypass]") {
+    // A game silent on a load screen has buffered time in that silence; only the padding's
+    // zeros come off, never a run that reaches down to where the audio could still be.
+    AudioCore::TimeStretcher ts;
+    ts.SetRatioBounds(1.0, 1.0);
+    std::vector<s16> in = Tone(0, 4000);
+    in.resize((4000 + 3000) * 2, 0);
+    std::vector<s16> out(kCallback * 2);
+    const std::size_t first = ts.Process(in.data(), 7000, out.data(), kCallback);
+    std::vector<s16> flushed(12288 * 2);
+    const std::size_t rest = ts.FlushInto(flushed.data(), 12288);
+    REQUIRE(first + rest >= 7000 - ts.SeekFrames() - ts.OverlapFrames() - 16);
+    REQUIRE(first + rest <= 7000);
+
+    AudioCore::TimeStretcher silent;
+    silent.SetRatioBounds(1.0, 1.0);
+    const std::vector<s16> zeros(5000 * 2, 0);
+    const std::size_t heard = silent.Process(zeros.data(), 5000, out.data(), kCallback);
+    const std::size_t kept = silent.FlushInto(flushed.data(), 12288);
+    REQUIRE(heard + kept >= 5000 - silent.SeekFrames() - silent.OverlapFrames() - 16);
+}
+
 TEST_CASE("TimeStretcher::SetTargetBacklog steers the ratio toward the target",
           "[audio_core][bypass]") {
     AudioCore::TimeStretcher wants_more;

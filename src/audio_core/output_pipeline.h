@@ -43,6 +43,9 @@ public:
     // cycle to cycle, and trimming to the exact target would chase it with a lone cut every
     // couple of seconds.
     static constexpr std::size_t kTrimSlack = 128;
+    /// The most Bypass trims per callback, as a fraction of it: the excess a handover brings
+    /// goes at a tenth of real time, what the drain ran at, rather than in a burst of cuts.
+    static constexpr double kTrimRate = 0.1;
 
     /// What the last Render() did, for tests and the edge log.
     struct RenderStats {
@@ -52,8 +55,9 @@ public:
         std::size_t inserted = 0; // frames the splicer repeated
         std::size_t flushed = 0;  // frames the stretcher handed to the stash at Handover
         std::size_t joined = 0;   // frames dropped where the flushed frames met the FIFO's
-        std::size_t join_at = 0;  // output frame in this callback where the flushed run ended,
-                                  // 0 for none; the join's blend is the kJoinFrames before it
+        std::size_t join_at = 0;  // where the flushed run ended, in output frames from the
+                                  // start of this callback (it can lie in the next); 0 for
+                                  // none. The join's blend is the kJoinFrames before it
         std::size_t replayed = 0; // frames of stretcher output a forced Sync could not skip
         bool silenced = false;    // the core had the stream down; nothing was rendered
         std::size_t depth = 0;    // fifo + stash at the start of the callback
@@ -97,9 +101,11 @@ public:
     /// audio plus one callback. One burst is what a late burst costs, the second is the slack
     /// a slowdown is detected within.
     std::size_t FillTarget(std::size_t num_frames) const;
-    /// What Drain leaves in the stretcher for the handover: at least the prefill target, so
-    /// the beat's trough stays above the engage depth once it is in the stash, and at most
-    /// what a settled drain holds, so the handover is not taken mid-drain.
+    /// What the flush must put in the stash for Drain to hand over: at least the prefill
+    /// target, so the beat's trough stays above the engage depth, and at most one output
+    /// batch over it, the excess the trim removes at kTrimRate within about a second. The
+    /// content falls a tenth of a callback per callback in Drain, so the upper bound is
+    /// crossed on the way down and is where the handover lands.
     std::size_t HandoverLow(std::size_t num_frames) const;
     std::size_t HandoverHigh(std::size_t num_frames) const;
     /// Below this depth Bypass engages the stretcher: one callback plus half a burst, so an
@@ -143,10 +149,11 @@ private:
     void DiscardPending();
     std::size_t WarmDiscardNeeded() const;
     std::size_t Excess(std::size_t num_frames) const;
-    void ArmSeamFade();
+    /// What a flush now would put in the stash; what the handover band is judged on.
+    std::size_t FlushYield() const;
     /// Arms the fade to begin `offset` frames into the output that follows, from the level
-    /// there rather than the last frame handed on.
-    void ArmSeamFadeAt(std::size_t offset);
+    /// just before it; at 0, from the last frame handed on.
+    void ArmSeamFade(std::size_t offset = 0);
     void ApplySeamFade(s16* buffer, std::size_t num_frames);
 
     static constexpr double kSpeedTimeConstant = 0.3; // seconds, the fast estimate
@@ -154,7 +161,10 @@ private:
     // either lands inside the window or not: ten seconds gives 0.17%, enough to tell a host
     // at 99.5%, which Bypass cannot serve, from one at full speed. Two seconds could not.
     static constexpr std::size_t kSpeedWindowFrames = 327680;
-    static constexpr std::size_t kSpeedWindowMax = 4096;     // callbacks the ring holds
+    // Callbacks the ring holds. A ring full of real entries counts as settled too, so a
+    // sink with callbacks under kSpeedWindowFrames / kSpeedWindowMax frames (80) still
+    // reaches Drain, on a shorter window.
+    static constexpr std::size_t kSpeedWindowMax = 4096;
     static constexpr std::size_t kSpeedWindowSettle = 32768; // frames before it is trusted
     static constexpr double kStretchTargetBacklog = 0.125;   // seconds, master's servo target
     static constexpr double kStretchMinRatio = 0.05;
@@ -187,11 +197,12 @@ private:
     // Arrival over request: the speed the emulation actually runs at, as the audio thread
     // sees it. fifo_left is the FIFO's depth after the previous callback's pops, so the
     // difference at the next is what arrived in between. Arrivals come a video frame at a
-    // time and beat against the callbacks, so `speed` is a ratio of sums over about two
-    // seconds, within a percent of the truth at any callback size, and `speed_fast` a short
-    // EMA that answers in a tenth of a second but dips to ~0.95 on every burst gap.
+    // time and beat against the callbacks, so `speed` is a ratio of sums over ten seconds,
+    // within a fifth of a percent of the truth at any callback size, and `speed_fast` a
+    // short EMA that answers in a tenth of a second but dips to ~0.95 on every burst gap.
     double speed = 1.0;
     bool speed_settled = false;
+    std::size_t speed_entries = 0; // real entries in the ring, up to kSpeedWindowMax
     double speed_fast = 1.0;
     std::array<std::size_t, kSpeedWindowMax> arrivals{};
     std::array<std::size_t, kSpeedWindowMax> requests{};
@@ -205,6 +216,9 @@ private:
     // would trigger cuts at the right average depth. Each cut lowers every entry by what it
     // removed, so the minimum stays what the trough would be now rather than what it was.
     std::array<std::size_t, kLowWaterWindow> depth_window{};
+    // What the trim may cut now: grows by kTrimRate of each Bypass callback, up to one
+    // period, and each cut spends it. Audio thread only.
+    std::size_t trim_credit = 0;
     std::size_t window_pos = 0;
     // Flushed frames still at the front of the stash after a Handover. They continue the
     // stretcher's output exactly; the seam is where they run out and the FIFO's frames take
@@ -222,8 +236,8 @@ private:
     // different points, so a long overlap is heard for itself. The gain at its midpoint:
     // lower attenuates the discontinuity the seam carries, at the cost of a deeper notch.
     // Audio thread only.
-    static constexpr unsigned kHandoverFadeFrames = 256;
-    static constexpr float kHandoverDipGain = 0.15f;
+    static constexpr unsigned kSeamFadeFrames = 256;
+    static constexpr float kSeamDipGain = 0.15f;
     unsigned fade_out_frames = 0;
     std::size_t fade_delay = 0;
     std::array<float, 2> fade_out_from{};

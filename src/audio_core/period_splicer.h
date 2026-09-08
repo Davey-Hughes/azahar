@@ -30,6 +30,8 @@ public:
     static constexpr unsigned kJoinFrames = 128;
     /// How far into the second stream JoinFlush() looks for the continuation, in frames.
     static constexpr unsigned kJoinSearch = 2048;
+    /// The fraction of the reference's energy a join's best mismatch may reach; see JoinFlush().
+    static constexpr float kJoinAcceptFraction = 0.5f;
 
     struct Result {
         std::size_t written;  // frames written to out
@@ -92,7 +94,19 @@ public:
         // The search and the join both read frames p + kJoinFrames deep, which must exist;
         // the repeat then reads back from the front, which needs num_frames - p of them.
         const std::size_t max_p = std::min<std::size_t>(kMaxPeriod, num_frames - kJoinFrames);
-        const std::size_t p = Find(a, std::min(avail, num_frames), max_p);
+        std::size_t p = Find(a, std::min(avail, num_frames), max_p);
+        if (p == 0) {
+            // Silence has no period to repeat, but repeating it is free of artifacts, and a
+            // raw path that never falls behind in silence is never overtaken: insert as much
+            // of the silent lead as fits, so a warm-up in silence still syncs.
+            const std::size_t silent = LeadingSilence(a, std::min(avail, max_p));
+            if (silent >= kMinPeriod && avail >= num_frames - silent) {
+                std::memset(out, 0, silent * 2 * sizeof(s16));
+                std::memcpy(out + (silent * 2), a, (num_frames - silent) * 2 * sizeof(s16));
+                stash.Consume(num_frames - silent);
+                return {num_frames, num_frames - silent, silent};
+            }
+        }
         if (p == 0 || avail < num_frames - p) {
             return Cut(out, num_frames, stash, 0);
         }
@@ -115,9 +129,11 @@ public:
     /// the frames before that point, and drops what lies between, so the join is phase
     /// continuous. At least kCorrFrames are dropped, since the match is scored on the frames
     /// before the candidate, which must lie in the second stream. Returns the frames dropped;
-    /// 0, with the stash untouched, when either side is too short to search, or the first
+    /// 0, with the stash untouched, when either side is too short to search, when the first
     /// stream ends in silence (scored on the channel sum, so antiphase stereo counts) and any
-    /// junction will do.
+    /// junction will do, or when nothing within reach continues it: a rest straddling the
+    /// boundary makes every candidate past it score like a chance match, and taking the
+    /// best of those would delete the rest, where a fade across it is right.
     std::size_t JoinFlush(FrameStash& stash, std::size_t boundary) {
         const std::size_t avail = stash.Size();
         if (boundary < kJoinFrames || avail < boundary + kCorrFrames + kMinPeriod) {
@@ -151,6 +167,11 @@ public:
                 best_diff = diff;
                 best = p;
             }
+        }
+        // A continuation of the same material scores near zero against the reference's
+        // energy; unrelated material scores around twice it, and a rest exactly it.
+        if (best_diff > kJoinAcceptFraction * e_ref) {
+            return 0;
         }
         for (std::size_t i = 0; i < kJoinFrames; i++) {
             const float w = Ramp(i, kJoinFrames);

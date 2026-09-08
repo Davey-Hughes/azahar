@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <vector>
 #include "common/common_types.h"
 
 namespace soundtouch {
@@ -31,8 +32,6 @@ public:
     std::size_t Process(const s16* in, std::size_t num_in, s16* out, std::size_t num_out);
 
     void Clear();
-
-    void Flush();
 
     /// The output backlog the servo in Process() steers toward, in seconds: half of what it
     /// tolerates before pushing back. 0.125 s by default, master's 50% of 0.25 s.
@@ -65,11 +64,14 @@ public:
     /// Reads and drops up to `max_frames` of output. Returns the frames dropped.
     std::size_t Discard(std::size_t max_frames);
     /// Flushes: pads SoundTouch with silence until everything it holds has come out, reads
-    /// that into `out` and trims the padding back off, then clears. Ends on clean audio, up
-    /// to one overlap short of what was fed; SoundTouch's own count is not used, since it
-    /// goes wrong across tempo steps. Returns the frames kept; anything past `max_frames` is
-    /// dropped with a warning.
+    /// that into `out` and trims the padding back off, then clears. Ends on clean audio, or
+    /// on the audio's own silence, at most FlushShortfall() short of what was fed;
+    /// SoundTouch's own count is not used, since it goes wrong across tempo steps. Returns
+    /// the frames kept; anything past `max_frames` is dropped with a warning.
     std::size_t FlushInto(s16* out, std::size_t max_frames);
+    /// How much a flush can fall short of what is inside: one seek window, which the last
+    /// round starts anywhere within, plus one overlap, which it blends into the padding.
+    std::size_t FlushShortfall() const;
     /// One overlap, and one seek window, at the current settings, in frames.
     std::size_t OverlapFrames() const;
     std::size_t SeekFrames() const;
@@ -90,6 +92,7 @@ private:
     double min_ratio = 0.05;
     double max_ratio = std::numeric_limits<double>::infinity();
     std::array<s16, kDiscardChunkFrames * 2> discard_scratch{};
+    std::vector<float> put_scratch; // the float build's input, converted; grows once
 };
 
 } // namespace AudioCore

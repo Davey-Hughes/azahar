@@ -324,8 +324,11 @@ void CheckTimeline(const Run& run, const SourceIndex& index, std::size_t first_c
         }
         if (raw && !in_flush && c >= skip_until) {
             const bool spliced = cb.stats.cut > 0 || cb.stats.inserted > 0 || cb.stats.join_at > 0;
-            // A join's blend can straddle into the callback after it, on top of a cut there.
-            const bool wide = cb.stats.edge != Edge::None || (last_join > 0 && c == last_join + 1);
+            // A join's blend can straddle into the callback after it, on top of a cut there;
+            // and a join can decline (on noise, the reference can lie in a WSOLA blend that
+            // matches nothing), leaving the seam fade's frames unlocated in its callback.
+            const bool wide = cb.stats.edge != Edge::None ||
+                              (last_join > 0 && (c == last_join || c == last_join + 1));
             const double threshold = wide ? 0.40 : spliced ? 0.65 : 0.95;
             REQUIRE(static_cast<double>(located) >= threshold * static_cast<double>(kCallback));
         }
@@ -416,11 +419,12 @@ TEST_CASE("OutputPipeline stretches through a slowdown and hands back", "[audio_
 
     CheckTimeline(run, index, first + 2);
 
-    // Within a second of the handover the excess is trimmed to the target plus the slack the
-    // splicer leaves, under a period over that, and the raw path never runs dry. The beat's
-    // step, a burst less a callback, is how far one cycle's floor can sit above the last.
+    // Within two seconds of the handover the excess, a round at most, is trimmed at a tenth
+    // of real time down to the target plus the slack the splicer leaves, under a period over
+    // that, and the raw path never runs dry. The beat's step, a burst less a callback, is
+    // how far one cycle's floor can sit above the last.
     const std::size_t target = pipeline->FillTarget(kCallback);
-    const std::size_t low = run.LowWater(handover + 64, handover + 80);
+    const std::size_t low = run.LowWater(handover + 112, handover + 128);
     const auto beat_step = static_cast<std::size_t>(kFramesPerBurst) - kCallback;
     REQUIRE(low >= kCallback);
     REQUIRE(low < target + OutputPipeline::kTrimSlack + PeriodSplicer::kMinPeriod + beat_step);
