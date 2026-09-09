@@ -97,12 +97,26 @@ public:
         fade_in_frames = kRampInFrames;
     }
 
-    /// Adopts a stream that is already flowing at full level, as when the ramp is turned on
-    /// mid-play: it never stopped, so there is nothing to fade in over.
-    void Adopt() {
-        down = false;
+    /// Drops every trace of the stream so far. `stream_down` says whether the source is
+    /// silent as this is called: a stream still playing is adopted at its current level, with
+    /// no ramp in, since there is nothing for it to ramp up from.
+    void Reset(bool stream_down) {
+        // Cleared in place: this runs on the audio callback thread, and the two history buffers
+        // put the object at 32 KB, so assigning a fresh one costs that much stack and the same
+        // again to copy. Neither buffer is read past its fill counter, so leaving them stands.
+        hist_pos = 0;
+        hist_fill = 0;
+        last_out = {};
+        tail_src_pos = 0;
+        tail_src_fill = 0;
+        tail_frames = 0;
+        tail_period = 0;
+        tail_from = {};
+        tail_join = {};
+        mute_frames = 0;
         fade_in_frames = 0;
         ramp_in_latched = false;
+        down = stream_down;
     }
 
     /// Source frames about to be played: applies the mute and the ramp in, and remembers the

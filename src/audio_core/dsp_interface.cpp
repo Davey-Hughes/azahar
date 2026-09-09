@@ -202,12 +202,13 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
     if (ramp_was_enabled && !ramp_enabled) {
         // Turned off mid-stream, possibly mid-tail. Drop that state rather than freeze it: a
         // tail left pending would hold stream_settled false for good, and every JumpBegin()
-        // after it would wait out its whole deadline for a tail that will never play.
-        ramp = StreamRamp{};
+        // after it would wait out its whole deadline for a tail that will never play. Down,
+        // since with the ramp gone from the path there is nothing left to settle.
+        ramp.Reset(true);
     } else if (!ramp_was_enabled && ramp_enabled) {
-        // Turned back on over a stream that never stopped. A ramp starts down, so left as it is
-        // it would fade in over audio already at full level.
-        ramp.Adopt();
+        // Turned back on over a stream that is already at level: adopt it where it stands
+        // rather than fade it in from zero over audio that is playing.
+        ramp.Reset(frames_written == 0);
     }
     ramp_was_enabled = ramp_enabled;
     if (ramp_enabled) {
