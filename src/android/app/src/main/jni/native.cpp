@@ -374,10 +374,12 @@ static Core::System::ResultStatus RunCitra(const std::string& filepath) {
                 }
             }
         } else {
-            // Ensure no audio bleeds out while game is paused
-            const float volume = Settings::values.volume.GetValue();
-            SCOPE_EXIT({ Settings::values.volume = volume; });
-            Settings::values.volume = 0;
+            // The core stops producing audio here, so take the stream down on its tail and
+            // bring it back on one, rather than leave the callback draining a FIFO and a
+            // stretcher that nothing is filling. The mute behind the tail keeps the pause
+            // silent.
+            system.DSP().StreamEnd();
+            SCOPE_EXIT({ system.DSP().StreamBegin(); });
 
             std::unique_lock pause_lock{paused_mutex};
             running_cv.wait(pause_lock, [] { return !pause_emulation || stop_run; });
