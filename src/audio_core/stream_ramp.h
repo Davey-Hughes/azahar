@@ -97,6 +97,14 @@ public:
         fade_in_frames = kRampInFrames;
     }
 
+    /// Adopts a stream that is already flowing at full level, as when the ramp is turned on
+    /// mid-play: it never stopped, so there is nothing to fade in over.
+    void Adopt() {
+        down = false;
+        fade_in_frames = 0;
+        ramp_in_latched = false;
+    }
+
     /// Source frames about to be played: applies the mute and the ramp in, and remembers the
     /// tail of the buffer for a later End() to continue from.
     void Track(s16* frames, std::size_t num_frames) {

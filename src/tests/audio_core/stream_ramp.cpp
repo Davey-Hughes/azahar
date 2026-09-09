@@ -221,6 +221,18 @@ TEST_CASE("StreamRamp does not end a stream that was already silent", "[audio_co
     }
 }
 
+TEST_CASE("StreamRamp adopts a stream that is already flowing", "[audio_core][stream_ramp]") {
+    AudioCore::StreamRamp ramp;
+    ramp.Adopt();
+    REQUIRE(!ramp.Down());
+
+    // A ramp left down would fade this buffer in from zero.
+    auto block = MakeSine(kToneHz, 0, kBlock);
+    const auto expected = block;
+    ramp.Process(block.data(), kBlock, kBlock);
+    REQUIRE(block == expected);
+}
+
 TEST_CASE("StreamRamp mutes what follows a tail before ramping back in", "[audio_core][stream_ramp]") {
     AudioCore::StreamRamp ramp;
     PlayTone(ramp);
