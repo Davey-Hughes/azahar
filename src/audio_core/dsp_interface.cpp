@@ -60,6 +60,22 @@ void DspInterface::SetSink(AudioCore::SinkType sink_type, std::string_view audio
     low_pass.Init(sink_sample_rate);
     // A new sink is a new stream: nothing of the old one to continue, and it opens on a ramp.
     ramp = StreamRamp{};
+    stretcher_discarded = false;
+    // The off-speed path is measured in the old sink's callback size, so a run carried across
+    // would stretch by the ratio of the two buffer sizes until the estimate reconverged, and an
+    // armed handover would cross-fade the new stream from a level the old one stopped at. Safe
+    // to clear the rings here: the old sink is gone and the new one has no callback yet.
+    wsola.Reset();
+    wsola_engaged = false;
+    arrival_avg = 0.0;
+    last_written = 0;
+    fade_out_frames = 0;
+    fade_out_from = {};
+    fade_last_out = {};
+    lowpass_was_active = false;
+    ramp_was_enabled = true;
+    time_stretcher.Clear();
+    flushing_time_stretcher = false;
     stream_settled.store(true, std::memory_order_release);
     achieved_speed = 0.0;
     sink->SetCallback(
