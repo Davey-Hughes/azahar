@@ -140,6 +140,12 @@ void DspInterface::DiscardPending() {
         stretcher_discarded = true;
         time_stretcher.Clear();
         flushing_time_stretcher = false;
+        // The off-speed path holds a reserve of its own, and whatever it has already
+        // synthesised is older still; the frames that arrive when the core resumes do not
+        // continue them.
+        if (wsola_engaged) {
+            wsola.BeginSession();
+        }
     }
 }
 
