@@ -71,21 +71,22 @@ void DspInterface::StreamBegin() {
 }
 
 bool DspInterface::JumpBegin() {
-    if (core_silenced.exchange(true, std::memory_order_acq_rel)) {
-        return false;
-    }
+    const bool was_silenced = core_silenced.exchange(true, std::memory_order_acq_rel);
     // The tail is the audio thread's to play. A load replaces this object and its sink, and a
     // reset closes the sink outright, so unless the tail has reached the device by then it is
     // cut off like the audio it was to replace: wait for a callback to report the stream
-    // settled, down with its tail out. A source that had already stopped, its tail long gone,
-    // is settled as it stands, and there is nothing to wait for. Deadline-bounded, since a sink
-    // that never calls back (null, or the libretro sink's immediate submission) settles nothing;
-    // a wakeup lost between the predicate and the wait costs the deadline, not the tail.
+    // settled, down with its tail out. A stream someone else took down is waited for just the
+    // same, since a pause is followed by a load often enough and its tail is no further along
+    // for having been armed by the pause; a source that had already stopped, its tail long
+    // gone, is settled as it stands and the wait returns at once. Deadline-bounded, since a
+    // sink that never calls back (null, or the libretro sink's immediate submission) settles
+    // nothing; a wakeup lost between the predicate and the wait costs the deadline, not the
+    // tail.
     const auto deadline = std::chrono::steady_clock::now() + kJumpSettleTimeout;
     std::unique_lock lock{settled_mutex};
     settled_cv.wait_until(lock, deadline,
                           [this] { return stream_settled.load(std::memory_order_acquire); });
-    return true;
+    return !was_silenced;
 }
 
 void DspInterface::JumpEnd(bool ramped) {

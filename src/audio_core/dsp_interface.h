@@ -117,8 +117,8 @@ public:
 
     /// Bracket a jump the frontend makes in the game's state, a load or a reset, so the splice
     /// lands in silence: takes the stream down and waits, bounded, for the tail to reach the
-    /// sink. Returns false and does nothing if the stream is already down, so the ramp back up
-    /// stays with whatever took it down. Emulation thread.
+    /// sink. Returns false if the stream was already down, so the ramp back up stays with
+    /// whatever took it down; the wait happens either way. Emulation thread.
     bool JumpBegin();
     void JumpEnd(bool ramped);
 
