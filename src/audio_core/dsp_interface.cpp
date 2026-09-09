@@ -29,11 +29,16 @@ DspInterface::DspInterface(Core::System& system_) : system(system_) {}
 DspInterface::~DspInterface() = default;
 
 void DspInterface::SetSink(AudioCore::SinkType sink_type, std::string_view audio_device) {
-    // Every settings apply comes through here, and the reset below cuts the stream wherever the
-    // waveform stands. Nothing to do for the sink already playing what was asked for.
+    // Every settings apply comes through here, and the teardown below cuts the stream wherever
+    // the waveform stands. Nothing to do for the sink already playing what was asked for.
     if (sink && sink_type == current_sink_type && audio_device == current_audio_device) {
         return;
     }
+
+    // The sink really is going: take the stream down on its tail rather than cutting it. Here
+    // rather than in the caller, so an apply that changes nothing pays neither the teardown nor
+    // the fade, and so every caller gets it without having to remember.
+    const bool ramped = JumpBegin();
 
     // Dispose of the current sink first to avoid contention.
     sink.reset();
@@ -47,6 +52,7 @@ void DspInterface::SetSink(AudioCore::SinkType sink_type, std::string_view audio
     sink->SetCallback(
         [this](s16* buffer, std::size_t num_frames) { OutputCallback(buffer, num_frames); });
     time_stretcher.SetOutputSampleRate(sink->GetNativeSampleRate());
+    JumpEnd(ramped);
 }
 
 Sink& DspInterface::GetSink() {
