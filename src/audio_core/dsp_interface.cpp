@@ -90,6 +90,14 @@ void DspInterface::DiscardPending() {
     // Produced before the stream was taken down; behind the tail it would only splice in.
     while (fifo.Pop(pop_scratch.data(), kPopChunkFrames) > 0) {
     }
+    // The stretcher holds a backlog of its own, an eighth of a second of it by design and up to
+    // a second before it stops taking input, which a resume would play behind the tail. Nothing
+    // refills it while the stream is down, so one clear per takedown does.
+    if (!stretcher_discarded) {
+        stretcher_discarded = true;
+        time_stretcher.Clear();
+        flushing_time_stretcher = false;
+    }
 }
 
 void DspInterface::OutputFrame(StereoFrame16 frame) {
@@ -139,6 +147,9 @@ void DspInterface::OutputCallback(s16* buffer, std::size_t num_frames) {
     // Taken down on purpose: nothing is popped, so the stretcher's bookkeeping stands still
     // and picks up where it left off, and the ramp below fills the buffer with the tail.
     const bool silenced = core_silenced.load(std::memory_order_acquire);
+    if (!silenced) {
+        stretcher_discarded = false;
+    }
 
     std::size_t frames_written = 0;
     if (silenced) {

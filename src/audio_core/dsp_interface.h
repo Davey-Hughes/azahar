@@ -135,6 +135,9 @@ private:
     std::atomic<bool> enable_time_stretching = false;
     std::atomic<bool> performing_time_stretching = false;
     std::atomic<bool> flushing_time_stretcher = false;
+    // Whether the stretcher's backlog has already been dropped for the current takedown.
+    // Audio thread only.
+    bool stretcher_discarded = false;
     Common::RingBuffer<s16, 0x2000, 2> fifo;
     TimeStretcher time_stretcher;
     static constexpr std::size_t kPopChunkFrames = 2048;
