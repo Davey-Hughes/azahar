@@ -179,6 +179,14 @@ static void TryShutdown() {
 
     Core::System& system{Core::System::GetInstance()};
 
+    // Shutdown() drops the DSP and its sink wherever the waveform stands. Take the stream down
+    // and wait, bounded, for the tail to reach the device first: nothing brings it back, so
+    // unlike a pause there is no later edge for it to play on. On the emulation thread, which
+    // is what makes reading dsp_core here safe.
+    if (system.IsPoweredOn()) {
+        system.DSP().JumpBegin();
+    }
+
     system.Shutdown();
     system.EjectCartridge();
 
