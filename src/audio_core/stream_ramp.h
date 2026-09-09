@@ -236,11 +236,15 @@ private:
 
         // Matched on the channel sum: the two share a fundamental, and scoring them together
         // stops a quiet channel's noise choosing the period for a loud one. The energy only
-        // decides whether there is anything here worth matching.
+        // decides whether there is anything here worth matching. The window every candidate is
+        // scored against is the same one, so it is summed once here rather than wrapped and
+        // added again for each of the hundreds of candidates below.
+        std::array<float, kCorrFrames> ref{};
         float e_ref = 0.0f;
         for (unsigned k = 0; k < kCorrFrames; k++) {
             const float* f = TailAt(1 + k);
             const float v = f[0] + f[1];
+            ref[k] = v;
             e_ref += v * v;
         }
         if (e_ref <= 0.0f) {
@@ -252,9 +256,8 @@ private:
         for (unsigned p = kMinPeriod; p <= max_p; p++) {
             float diff = 0.0f;
             for (unsigned k = 0; k < kCorrFrames; k++) {
-                const float* a = TailAt(1 + k);
                 const float* b = TailAt(1 + p + k);
-                const float d = (a[0] + a[1]) - (b[0] + b[1]);
+                const float d = ref[k] - (b[0] + b[1]);
                 diff += d * d;
             }
             if (best_diff < 0.0f || diff < best_diff) {
