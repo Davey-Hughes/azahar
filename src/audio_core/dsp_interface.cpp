@@ -29,10 +29,18 @@ DspInterface::DspInterface(Core::System& system_) : system(system_) {}
 DspInterface::~DspInterface() = default;
 
 void DspInterface::SetSink(AudioCore::SinkType sink_type, std::string_view audio_device) {
+    // Every settings apply comes through here, and the reset below cuts the stream wherever the
+    // waveform stands. Nothing to do for the sink already playing what was asked for.
+    if (sink && sink_type == current_sink_type && audio_device == current_audio_device) {
+        return;
+    }
+
     // Dispose of the current sink first to avoid contention.
     sink.reset();
 
     sink = AudioCore::GetSinkDetails(sink_type).create_sink(audio_device);
+    current_sink_type = sink_type;
+    current_audio_device = audio_device;
     // A new sink is a new stream: nothing of the old one to continue, and it opens on a ramp.
     ramp = StreamRamp{};
     stream_settled.store(true, std::memory_order_release);

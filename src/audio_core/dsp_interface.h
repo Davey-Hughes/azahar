@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <string>
 #include <boost/serialization/access.hpp>
 #include "audio_core/audio_types.h"
 #include "audio_core/stream_ramp.h"
@@ -158,6 +159,9 @@ private:
     std::mutex settled_mutex;
     std::condition_variable settled_cv;
     std::unique_ptr<Sink> sink;
+    // What the sink was opened for, so a settings apply that changes neither can leave it be.
+    SinkType current_sink_type{};
+    std::string current_audio_device;
 
     template <class Archive>
     void serialize(Archive& ar, const unsigned int) {}
