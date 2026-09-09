@@ -319,6 +319,15 @@ bool System::LoadStateBuffer(std::vector<u8> buffer) {
         return false;
     }
 
+    // As in LoadState(): take the stream down on its tail ahead of the decompression, so the
+    // splice the load makes in the game's audio lands in silence.
+    const bool ramped = dsp_core ? dsp_core->JumpBegin() : false;
+    SCOPE_EXIT({
+        if (ramped && dsp_core) {
+            dsp_core->JumpEnd(true);
+        }
+    });
+
     std::vector<u8> state(buffer.begin() + sizeof(CSTHeader), buffer.end());
     auto decompressed = Common::Compression::DecompressDataZSTD(state);
 
