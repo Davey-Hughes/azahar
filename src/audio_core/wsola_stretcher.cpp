@@ -226,6 +226,12 @@ s64 WsolaStretcher::FindBestOffset() const {
     }
 
     const double ref_energy = Energy(natural_pos);
+    // Same window for every candidate, and the search scores some 500 of them a hop: read it
+    // once rather than back through the ring mask each time.
+    double ref[kSynthesisHop];
+    for (int i = 0; i < kSynthesisHop; i++) {
+        ref[i] = in_mono[static_cast<int>((natural_pos + i) & (kInputCapacity - 1))];
+    }
 
     // Full radius regardless of hop: expansion needs the reach, since the natural continuation
     // sits |kSynthesisHop - hop| ahead of the nominal.
@@ -251,7 +257,7 @@ s64 WsolaStretcher::FindBestOffset() const {
     double best_score = -1.0e30;
 
     for (int k = lowest_k; k <= highest_k; k += kCoarseStride) {
-        const double s = Score(analysis_pos + k, ref_energy);
+        const double s = Score(analysis_pos + k, ref, ref_energy);
         if (s > best_score) {
             best_score = s;
             best_k = k;
@@ -261,7 +267,7 @@ s64 WsolaStretcher::FindBestOffset() const {
     const int lo = std::max(lowest_k, best_k - kFineRadius);
     const int hi = std::min(highest_k, best_k + kFineRadius);
     for (int k = lo; k <= hi; k++) {
-        const double s = Score(analysis_pos + k, ref_energy);
+        const double s = Score(analysis_pos + k, ref, ref_energy);
         if (s > best_score) {
             best_score = s;
             best_k = k;
@@ -281,13 +287,12 @@ double WsolaStretcher::Energy(s64 pos) const {
 }
 
 // Normalized so the search doesn't just latch onto the loudest candidate.
-double WsolaStretcher::Score(s64 pos, double ref_energy) const {
+double WsolaStretcher::Score(s64 pos, const double* ref, double ref_energy) const {
     double dot = 0.0;
     double energy = 0.0;
     for (int i = 0; i < kSynthesisHop; i++) {
         const double a = in_mono[static_cast<int>((pos + i) & (kInputCapacity - 1))];
-        const double b = in_mono[static_cast<int>((natural_pos + i) & (kInputCapacity - 1))];
-        dot += a * b;
+        dot += a * ref[i];
         energy += a * a;
     }
     return dot / std::sqrt((energy * ref_energy) + 1.0e-9);

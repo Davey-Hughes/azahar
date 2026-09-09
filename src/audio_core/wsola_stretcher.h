@@ -57,7 +57,7 @@ private:
     void SynthesiseHop(double ratio, bool emit);
     s64 FindBestOffset() const;
     double Energy(s64 pos) const;
-    double Score(s64 pos, double ref_energy) const;
+    double Score(s64 pos, const double* ref, double ref_energy) const;
 
     float window[kFrameSize];
 
