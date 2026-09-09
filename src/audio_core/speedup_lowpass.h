@@ -2,6 +2,13 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+// Provenance: the low-pass filter here is the author's own work, written to pair with the WSOLA
+// time-stretcher (see wsola_stretcher.h), and the author holds its copyright in full. The same
+// code is also proposed on unmerged branches of RetroArch, melonDS and mGBA, where it carries
+// each project's per-file licence header (MIT, GPL-3.0 and MPL-2.0 respectively). None of those
+// has been accepted upstream, so this copy may be the first to land anywhere; the
+// GPL-2.0-or-later grant above is the author's own and does not derive from any of them.
+
 #pragma once
 
 #include <algorithm>
