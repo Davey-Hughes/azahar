@@ -480,8 +480,10 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
         "Frontend Layout and 3D",
         "Let the frontend lay out the 3DS screens and show 3D, with its own "
         "screen layout, stereo 3D mode and a shader for each screen and eye. "
-        "'Auto' does this whenever the frontend can, and otherwise uses Screen "
-        "Layout and Stereoscopic 3D Mode. 'Off' always uses them. Prominent 3DS "
+        "'Auto' does this where the frontend can: always in its stereo 3D "
+        "modes, and in its 2D mode only while Screen Layout is Default "
+        "Top-Bottom and Stereoscopic 3D Mode is Off. Otherwise, and always with "
+        "'Off', Screen Layout and Stereoscopic 3D Mode apply. Prominent 3DS "
         "Screen picks which screen the frontend shows first.",
         nullptr,
         config::category::layout,
@@ -513,7 +515,9 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
         config::layout::swap_screen,
         "Prominent 3DS Screen",
         "Prominent Screen",
-        "Choose which screen is displayed prominently in single screen or large screen layouts.",
+        "Choose which screen is displayed prominently in single screen or large screen layouts. "
+        "While the frontend lays out the screens (Frontend Layout and 3D), this "
+        "chooses which screen the frontend shows first.",
         nullptr,
         config::category::layout,
         {
