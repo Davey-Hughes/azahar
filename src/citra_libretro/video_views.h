@@ -8,6 +8,7 @@
 #include <vector>
 #include "citra_libretro/libretro_views.h"
 #include "common/common_types.h"
+#include "common/settings.h"
 #include "core/frontend/framebuffer_layout.h"
 
 namespace LibRetro::VideoViews {
@@ -20,10 +21,11 @@ struct Mode {
     bool operator==(const Mode&) const = default;
 };
 
-/// The mode for the "Frontend Layout and 3D" option (true for Auto), the
-/// frontend's RETRO_VIDEO_VIEWS_STATUS_ flags, and whether the renderer draws
-/// both eyes.
-Mode SelectMode(bool frontend_layout, unsigned status, bool renderer_stereo);
+/// The mode for the "Frontend Layout and 3D" option (true for Auto), the user's own Screen
+/// Layout and Stereoscopic 3D Mode, the frontend's RETRO_VIDEO_VIEWS_STATUS_ flags, and whether
+/// the renderer draws both eyes.
+Mode SelectMode(bool frontend_layout, Settings::LayoutOption own_layout,
+                Settings::StereoRenderOption own_3d, unsigned status, bool renderer_stereo);
 
 /// The mode Azahar's layout currently follows.
 const Mode& CurrentMode();

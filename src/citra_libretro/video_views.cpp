@@ -26,10 +26,16 @@ retro_video_view MakeView(const Common::Rectangle<u32>& rect, u32 x_offset, unsi
 
 } // namespace
 
-Mode SelectMode(bool frontend_layout, unsigned status, bool renderer_stereo) {
+Mode SelectMode(bool frontend_layout, Settings::LayoutOption own_layout,
+                Settings::StereoRenderOption own_3d, unsigned status, bool renderer_stereo) {
+    const bool presents = (status & RETRO_VIDEO_VIEWS_STATUS_PRESENTS) != 0;
+    const bool stereo = (status & RETRO_VIDEO_VIEWS_STATUS_STEREO) != 0;
+    // In 2D, views only stand in for Azahar's own layout where they look the same.
+    const bool own_is_default = own_layout == Settings::LayoutOption::Default &&
+                                own_3d == Settings::StereoRenderOption::Off;
     Mode mode;
-    mode.active = frontend_layout && (status & RETRO_VIDEO_VIEWS_STATUS_PRESENTS) != 0;
-    mode.stereo = mode.active && renderer_stereo && (status & RETRO_VIDEO_VIEWS_STATUS_STEREO) != 0;
+    mode.active = frontend_layout && presents && (stereo || own_is_default);
+    mode.stereo = mode.active && renderer_stereo && stereo;
     return mode;
 }
 

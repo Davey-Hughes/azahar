@@ -98,20 +98,41 @@ TEST_CASE("Video views API values match RetroArch", "[libretro]") {
 
 TEST_CASE("VideoViews::SelectMode", "[libretro]") {
     using LibRetro::VideoViews::SelectMode;
+    using Settings::LayoutOption;
+    using Settings::StereoRenderOption;
     constexpr unsigned presents = RETRO_VIDEO_VIEWS_STATUS_PRESENTS;
     constexpr unsigned stereo = RETRO_VIDEO_VIEWS_STATUS_STEREO;
+    constexpr auto def = LayoutOption::Default;
+    constexpr auto large = LayoutOption::LargeScreen;
+    constexpr auto off = StereoRenderOption::Off;
+    constexpr auto anaglyph = StereoRenderOption::Anaglyph;
     const Mode own{};
     const Mode views_2d{true, false};
     const Mode views_stereo{true, true};
 
-    REQUIRE(SelectMode(true, presents, true) == views_2d);
-    REQUIRE(SelectMode(true, presents | stereo, true) == views_stereo);
+    REQUIRE(SelectMode(true, def, off, presents, true) == views_2d);
+    REQUIRE(SelectMode(true, def, off, presents | stereo, true) == views_stereo);
     // The software renderer draws one eye.
-    REQUIRE(SelectMode(true, presents | stereo, false) == views_2d);
-    REQUIRE(SelectMode(true, stereo, true) == own);
-    REQUIRE(SelectMode(true, 0, true) == own);
+    REQUIRE(SelectMode(true, def, off, presents | stereo, false) == views_2d);
+    REQUIRE(SelectMode(true, def, off, stereo, true) == own);
+    REQUIRE(SelectMode(true, def, off, 0, true) == own);
+
+    // In 2D a layout or 3D mode of the user's own stays; the frontend's stereo takes over.
+    REQUIRE(SelectMode(true, large, off, presents, true) == own);
+    REQUIRE(SelectMode(true, large, off, presents | stereo, true) == views_stereo);
+    REQUIRE(SelectMode(true, def, anaglyph, presents, true) == own);
+    REQUIRE(SelectMode(true, def, anaglyph, presents | stereo, true) == views_stereo);
+    REQUIRE(SelectMode(true, large, off, presents | stereo, false) == views_2d);
+    REQUIRE(SelectMode(true, large, off, 0, true) == own);
+
     // "Frontend Layout and 3D" is Off.
-    REQUIRE(SelectMode(false, presents | stereo, true) == own);
+    for (const auto layout : {def, large}) {
+        for (const auto mode_3d : {off, anaglyph}) {
+            for (const unsigned status : {0u, presents, presents | stereo}) {
+                REQUIRE(SelectMode(false, layout, mode_3d, status, true) == own);
+            }
+        }
+    }
 }
 
 TEST_CASE("VideoViews::PackedSize", "[libretro]") {
