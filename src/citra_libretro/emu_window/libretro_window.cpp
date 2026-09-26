@@ -12,6 +12,7 @@
 #include "citra_libretro/core_settings.h"
 #include "citra_libretro/environment.h"
 #include "citra_libretro/input/input_factory.h"
+#include "citra_libretro/video_views.h"
 #include "common/settings.h"
 #include "core/3ds.h"
 #ifdef ENABLE_OPENGL
@@ -235,6 +236,13 @@ void EmuWindow_LibRetro::DoneCurrent() {
 void EmuWindow_LibRetro::OnMinimalClientAreaChangeRequest(std::pair<u32, u32> _minimal_size) {}
 
 LayoutGeometry ComputeLayoutGeometry() {
+    const auto& views = LibRetro::VideoViews::CurrentMode();
+    if (views.active) {
+        const auto [width, height] = LibRetro::VideoViews::PackedSize(
+            views.stereo, Settings::values.resolution_factor.GetValue());
+        return {width, height, true};
+    }
+
     unsigned baseX;
     unsigned baseY;
     bool emulated_pointer = true;
