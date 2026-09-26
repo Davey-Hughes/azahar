@@ -153,6 +153,14 @@ bool SetGeometry(retro_system_av_info* cb) {
     return environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, cb);
 }
 
+bool GetVideoViewsStatus(unsigned* flags) {
+    return environ_cb(RETRO_ENVIRONMENT_GET_VIDEO_VIEWS_STATUS, flags);
+}
+
+bool SetVideoViews(const retro_video_views* views) {
+    return environ_cb(RETRO_ENVIRONMENT_SET_VIDEO_VIEWS, (void*)views);
+}
+
 bool SetInputDescriptors(const retro_input_descriptor desc[]) {
     return environ_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, (void*)desc);
 }

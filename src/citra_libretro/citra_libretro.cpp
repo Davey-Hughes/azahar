@@ -32,6 +32,7 @@
 #include "citra_libretro/core_settings.h"
 #include "citra_libretro/environment.h"
 #include "citra_libretro/input/input_factory.h"
+#include "citra_libretro/video_views.h"
 
 #include "common/arch.h"
 #if CITRA_ARCH(x86_64)
@@ -63,6 +64,10 @@ public:
     bool game_loaded = false;
     bool first_run_loop = true;
     struct retro_hw_render_callback hw_render{};
+    /// The last video views status logged; all ones before the first run.
+    unsigned views_status = ~0u;
+    /// The frontend holds a view map from us.
+    bool views_map_sent = false;
 };
 
 CitraLibRetro* emu_instance;
@@ -212,6 +217,51 @@ static void UpdateSettings() {
 }
 
 /**
+ * Follows the frontend's video views status, and sends the view map for the
+ * frame this run draws.
+ */
+static void UpdateVideoViews() {
+    unsigned status = 0;
+    if (!LibRetro::GetVideoViewsStatus(&status)) {
+        status = 0;
+    }
+    const auto mode = LibRetro::VideoViews::SelectMode(LibRetro::settings.frontend_layout, status,
+                                                       Settings::values.graphics_api.GetValue() !=
+                                                           Settings::GraphicsAPI::Software);
+    const bool changed = mode != LibRetro::VideoViews::CurrentMode();
+
+    if (changed || status != emu_instance->views_status) {
+        LOG_INFO(Frontend, "Video views: presents={} stereo={}, {}",
+                 (status & RETRO_VIDEO_VIEWS_STATUS_PRESENTS) ? 1 : 0,
+                 (status & RETRO_VIDEO_VIEWS_STATUS_STEREO) ? 1 : 0,
+                 !mode.active  ? "own layout"
+                 : mode.stereo ? "views in stereo"
+                               : "views in 2D");
+        emu_instance->views_status = status;
+    }
+
+    if (changed) {
+        LibRetro::VideoViews::SetCurrentMode(mode);
+        LibRetro::ApplyLayoutSettings();
+        Core::System::GetInstance().ApplySettings();
+        emu_instance->emu_window->UpdateLayout();
+    }
+
+    if (mode.active) {
+        const auto views =
+            LibRetro::VideoViews::BuildMap(emu_instance->emu_window->GetFramebufferLayout(),
+                                           mode.stereo, Settings::values.swap_screen.GetValue());
+        const retro_video_views map{views.data(), static_cast<unsigned>(views.size())};
+        LibRetro::SetVideoViews(&map);
+        emu_instance->views_map_sent = true;
+    } else if (emu_instance->views_map_sent) {
+        const retro_video_views none{nullptr, 0};
+        LibRetro::SetVideoViews(&none);
+        emu_instance->views_map_sent = false;
+    }
+}
+
+/**
  * libretro callback; Called every game tick.
  */
 void retro_run() {
@@ -268,6 +318,8 @@ void retro_run() {
 
         screen_swap_button_state = screen_swap_btn;
     }
+
+    UpdateVideoViews();
 
 #ifdef ENABLE_OPENGL
     if (Settings::values.graphics_api.GetValue() == Settings::GraphicsAPI::OpenGL) {
@@ -512,6 +564,8 @@ bool retro_load_game(const struct retro_game_info* info) {
     }
 #endif
 
+    // The mode outlives retro_deinit() while the core stays loaded.
+    LibRetro::VideoViews::SetCurrentMode({});
     UpdateSettings();
 
     // If using HW rendering, don't actually load the game here. azahar wants
