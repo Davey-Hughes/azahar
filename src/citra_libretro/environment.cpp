@@ -7,7 +7,6 @@
 #include "audio_core/audio_types.h"
 #include "audio_core/libretro_sink.h"
 #include "common/scm_rev.h"
-#include "core/3ds.h"
 #include "core_settings.h"
 #include "emu_window/libretro_window.h"
 #include "environment.h"
