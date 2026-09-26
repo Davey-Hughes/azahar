@@ -2,6 +2,7 @@
 // Licensed under GPLv2 or any later version
 // Refer to the license.txt file included.
 
+#include <algorithm>
 #include <list>
 #include <numeric>
 #include <vector>
@@ -68,6 +69,10 @@ public:
     unsigned views_status = ~0u;
     /// The frontend holds a view map from us.
     bool views_map_sent = false;
+    /// False once the frontend has shown it doesn't know the status call.
+    bool views_status_supported = true;
+    /// The last view map the frontend rejected, logged once.
+    std::vector<retro_video_view> views_rejected;
 };
 
 CitraLibRetro* emu_instance;
@@ -216,18 +221,31 @@ static void UpdateSettings() {
     Core::System::GetInstance().ApplySettings();
 }
 
+static bool SameViews(const std::vector<retro_video_view>& a,
+                      const std::vector<retro_video_view>& b) {
+    return std::equal(a.begin(), a.end(), b.begin(), b.end(),
+                      [](const retro_video_view& l, const retro_video_view& r) {
+                          return l.x == r.x && l.y == r.y && l.width == r.width &&
+                                 l.height == r.height && l.screen == r.screen && l.eye == r.eye &&
+                                 l.aspect_ratio == r.aspect_ratio;
+                      });
+}
+
 /**
  * Follows the frontend's video views status, and sends the view map for the
  * frame this run draws.
  */
 static void UpdateVideoViews() {
     unsigned status = 0;
-    if (!LibRetro::GetVideoViewsStatus(&status)) {
+    // A frontend that doesn't know the call won't learn it while content runs.
+    if (emu_instance->views_status_supported && !LibRetro::GetVideoViewsStatus(&status)) {
+        emu_instance->views_status_supported = false;
         status = 0;
     }
-    const auto mode = LibRetro::VideoViews::SelectMode(LibRetro::settings.frontend_layout, status,
-                                                       Settings::values.graphics_api.GetValue() !=
-                                                           Settings::GraphicsAPI::Software);
+    const auto mode = LibRetro::VideoViews::SelectMode(
+        LibRetro::settings.frontend_layout, LibRetro::settings.layout_option,
+        LibRetro::settings.render_3d, status,
+        Settings::values.graphics_api.GetValue() != Settings::GraphicsAPI::Software);
     const bool changed = mode != LibRetro::VideoViews::CurrentMode();
 
     if (changed || status != emu_instance->views_status) {
@@ -252,7 +270,11 @@ static void UpdateVideoViews() {
             LibRetro::VideoViews::BuildMap(emu_instance->emu_window->GetFramebufferLayout(),
                                            mode.stereo, Settings::values.swap_screen.GetValue());
         const retro_video_views map{views.data(), static_cast<unsigned>(views.size())};
-        LibRetro::SetVideoViews(&map);
+        if (!LibRetro::SetVideoViews(&map) && !SameViews(views, emu_instance->views_rejected)) {
+            LOG_ERROR(Frontend, "The frontend rejected a video views map of {} views",
+                      views.size());
+            emu_instance->views_rejected = views;
+        }
         emu_instance->views_map_sent = true;
     } else if (emu_instance->views_map_sent) {
         const retro_video_views none{nullptr, 0};
@@ -566,6 +588,7 @@ bool retro_load_game(const struct retro_game_info* info) {
 
     // The mode outlives retro_deinit() while the core stays loaded.
     LibRetro::VideoViews::SetCurrentMode({});
+    emu_instance->views_status_supported = true;
     UpdateSettings();
 
     // If using HW rendering, don't actually load the game here. azahar wants
@@ -689,6 +712,7 @@ bool retro_load_game(const struct retro_game_info* info) {
 void retro_unload_game() {
     LOG_DEBUG(Frontend, "Unloading game...");
     Core::System::GetInstance().Shutdown();
+    emu_instance->views_status_supported = true;
 }
 
 unsigned retro_get_region() {
