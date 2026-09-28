@@ -1,6 +1,6 @@
 // Copyright 2026 Citra Emulator Project / Azahar Emulator Project
-// Licensed under GPLv2 or any later version
-// Refer to the misc/licenses/gplv2.txt file included.
+// Licensed under GPLv3 or any later version
+// Refer to the LICENSE.txt file included.
 
 #include <algorithm>
 #include <chrono>
@@ -179,6 +179,14 @@ void MouseTracker::Update(int bufferWidth, int bufferHeight,
     projectedY = static_cast<float>(y);
 
     isPressed = state;
+
+    if (state != loggedPressed || (state && (x != loggedX || y != loggedY))) {
+        LOG_DEBUG(Frontend, "Touch {} at {}, {} of {}x{}", state ? "down" : "up", x, y,
+                  layout.bottom_screen.GetWidth(), layout.bottom_screen.GetHeight());
+        loggedPressed = state;
+        loggedX = x;
+        loggedY = y;
+    }
 
     if (wasMoved) {
         last_moved = std::chrono::steady_clock::now();

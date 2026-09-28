@@ -1,6 +1,6 @@
 // Copyright 2026 Citra Emulator Project / Azahar Emulator Project
-// Licensed under GPLv2 or any later version
-// Refer to the misc/licenses/gplv2.txt file included.
+// Licensed under GPLv3 or any later version
+// Refer to the LICENSE.txt file included.
 
 #pragma once
 
@@ -70,6 +70,11 @@ private:
 
     std::chrono::steady_clock::time_point last_moved;
     bool isPressed;
+
+    // The touch last logged, so each change logs once.
+    int loggedX = -1;
+    int loggedY = -1;
+    bool loggedPressed = false;
 
     Layout::FramebufferLayout framebuffer_layout;
     std::unique_ptr<CursorRenderer> cursor_renderer;
