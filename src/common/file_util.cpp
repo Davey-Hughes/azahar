@@ -549,7 +549,13 @@ u64 GetSize(const std::string& filename) {
 
 u64 GetSize(const int fd) {
     file_stat_t buf;
-    if (fstat(fd, &buf) != 0) {
+#if defined(_WIN32) && !defined(_MSC_VER) && defined(HAVE_LIBRETRO)
+    // file_stat_t is struct _stat64 here, which mingw-w64's fstat does not take
+    const int result = _fstat64(fd, &buf);
+#else
+    const int result = fstat(fd, &buf);
+#endif
+    if (result != 0) {
         LOG_ERROR(Common_Filesystem, "GetSize: stat failed {}: {}", fd, GetLastErrorMsg());
         return 0;
     }
