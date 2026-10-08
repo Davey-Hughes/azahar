@@ -4,8 +4,6 @@ on:
   push:
     branches: [ "*" ]
     tags: [ "*" ]
-  pull_request:
-    branches: [ master ]
   workflow_dispatch:
 
 env:
@@ -97,6 +95,10 @@ jobs:
           cmake $CORE_ARGS $EXTRA_CORE_ARGS . -B $BUILD_DIR
           cmake --build $BUILD_DIR --target citra_libretro --config Release -j $(nproc)
           llvm-strip -s $BUILD_DIR/$EXTRA_PATH/azahar_libretro.*
+      - name: Test
+        run: |
+          cmake --build $BUILD_DIR --target tests --config Release -j $(nproc)
+          $BUILD_DIR/$EXTRA_PATH/tests "[libretro]"
       - name: Pack
         run: ./.ci/libretro-pack.sh
       - name: Generate SBOM
