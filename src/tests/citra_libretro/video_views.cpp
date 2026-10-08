@@ -159,11 +159,16 @@ TEST_CASE("Video views API values match RetroArch", "[libretro]") {
     REQUIRE(RETRO_ENVIRONMENT_GET_VIDEO_VIEWS_STATUS == (96 | RETRO_ENVIRONMENT_EXPERIMENTAL));
     REQUIRE(RETRO_VIDEO_VIEWS_STATUS_PRESENTS == 1);
     REQUIRE(RETRO_VIDEO_VIEWS_STATUS_STEREO == 2);
+    REQUIRE(RETRO_VIDEO_VIEWS_STATUS_HMD == 4);
     REQUIRE(RETRO_VIDEO_VIEW_EYE_NONE == 0);
     REQUIRE(RETRO_VIDEO_VIEW_EYE_LEFT == 1);
     REQUIRE(RETRO_VIDEO_VIEW_EYE_RIGHT == 2);
     REQUIRE(RETRO_VIDEO_VIEWS_MAX == 8);
+    REQUIRE(RETRO_VIDEO_VIEWS_FLAG_REQUEST_FLAT == 1);
     REQUIRE(sizeof(retro_video_view) == 6 * sizeof(unsigned) + sizeof(float));
+    // The frontend writes the recommended view size back into the struct, so a short one would
+    // let it write past the end.
+    REQUIRE(sizeof(retro_video_views) == sizeof(void*) + 6 * sizeof(unsigned));
 }
 
 TEST_CASE("VideoViews::SelectMode", "[libretro]") {

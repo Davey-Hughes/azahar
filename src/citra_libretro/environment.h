@@ -101,7 +101,7 @@ bool SetGeometry(retro_system_av_info* cb);
 bool GetVideoViewsStatus(unsigned* flags);
 
 /// Tells the frontend how the frame divides into screens and eyes.
-bool SetVideoViews(const retro_video_views* views);
+bool SetVideoViews(retro_video_views* views);
 
 /// Tells LibRetro what input buttons are labelled on the 3DS.
 bool SetInputDescriptors(const retro_input_descriptor desc[]);

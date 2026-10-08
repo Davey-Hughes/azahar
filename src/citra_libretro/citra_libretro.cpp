@@ -270,7 +270,9 @@ static void UpdateVideoViews() {
         const auto views =
             LibRetro::VideoViews::BuildMap(emu_instance->emu_window->GetFramebufferLayout(),
                                            mode.stereo, Settings::values.swap_screen.GetValue());
-        const retro_video_views map{views.data(), static_cast<unsigned>(views.size())};
+        retro_video_views map{};
+        map.views = views.data();
+        map.num_views = static_cast<unsigned>(views.size());
         if (!LibRetro::SetVideoViews(&map) && !SameViews(views, emu_instance->views_rejected)) {
             LOG_ERROR(Frontend, "The frontend rejected a video views map of {} views",
                       views.size());
@@ -278,7 +280,7 @@ static void UpdateVideoViews() {
         }
         emu_instance->views_map_sent = true;
     } else if (emu_instance->views_map_sent) {
-        const retro_video_views none{nullptr, 0};
+        retro_video_views none{};
         LibRetro::SetVideoViews(&none);
         emu_instance->views_map_sent = false;
     }

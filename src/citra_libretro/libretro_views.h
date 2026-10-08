@@ -6,7 +6,8 @@
 
 #include "libretro.h"
 
-// RetroArch's video views API, until the vendored libretro.h has it.
+// RetroArch's video views API as of libretro/RetroArch 43798a27e2, until the vendored libretro.h
+// has it.
 #ifndef RETRO_ENVIRONMENT_SET_VIDEO_VIEWS
 
 #define RETRO_ENVIRONMENT_SET_VIDEO_VIEWS (95 | RETRO_ENVIRONMENT_EXPERIMENTAL)
@@ -14,11 +15,19 @@
 
 #define RETRO_VIDEO_VIEWS_STATUS_PRESENTS (1 << 0)
 #define RETRO_VIDEO_VIEWS_STATUS_STEREO (1 << 1)
+#define RETRO_VIDEO_VIEWS_STATUS_HMD (1 << 2)
 
 #define RETRO_VIDEO_VIEW_EYE_NONE 0
 #define RETRO_VIDEO_VIEW_EYE_LEFT 1
 #define RETRO_VIDEO_VIEW_EYE_RIGHT 2
 #define RETRO_VIDEO_VIEWS_MAX 8
+#define RETRO_VIDEO_VIEWS_FLAG_REQUEST_FLAT (1 << 0)
+
+enum retro_vr_reference_space {
+    RETRO_VR_REFERENCE_SPACE_LOCAL = 0,
+    RETRO_VR_REFERENCE_SPACE_STAGE = 1,
+    RETRO_VR_REFERENCE_SPACE_DUMMY = INT_MAX
+};
 
 struct retro_video_view {
     unsigned x;
@@ -33,6 +42,12 @@ struct retro_video_view {
 struct retro_video_views {
     const struct retro_video_view* views;
     unsigned num_views;
+    unsigned flags;
+    enum retro_vr_reference_space reference_space;
+    float ipd_hint_m;
+    // Outputs: the frontend writes these back for a map it puts on a headset.
+    unsigned recommended_view_width;
+    unsigned recommended_view_height;
 };
 
 #endif

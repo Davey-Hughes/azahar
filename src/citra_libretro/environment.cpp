@@ -165,8 +165,8 @@ bool GetVideoViewsStatus(unsigned* flags) {
     return environ_cb(RETRO_ENVIRONMENT_GET_VIDEO_VIEWS_STATUS, flags);
 }
 
-bool SetVideoViews(const retro_video_views* views) {
-    return environ_cb(RETRO_ENVIRONMENT_SET_VIDEO_VIEWS, (void*)views);
+bool SetVideoViews(retro_video_views* views) {
+    return environ_cb(RETRO_ENVIRONMENT_SET_VIDEO_VIEWS, views);
 }
 
 bool SetInputDescriptors(const retro_input_descriptor desc[]) {
