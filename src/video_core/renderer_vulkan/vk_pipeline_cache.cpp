@@ -2,6 +2,7 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <chrono>
 #include <boost/container/static_vector.hpp>
 
 #include "common/common_paths.h"
@@ -12,6 +13,7 @@
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/loader/loader.h"
+#include "video_core/host_shaders/vulkan_ubershader_frag.h"
 #include "video_core/pica/shader_setup.h"
 #include "video_core/renderer_vulkan/pica_to_vk.h"
 #include "video_core/renderer_vulkan/vk_descriptor_update_queue.h"
@@ -56,7 +58,7 @@ AttribLoadFlags MakeAttribLoadFlag(Pica::PipelineRegs::VertexAttributeFormat for
     }
 }
 
-constexpr std::array<vk::DescriptorSetLayoutBinding, 6> BUFFER_BINDINGS = {{
+constexpr std::array<vk::DescriptorSetLayoutBinding, 7> BUFFER_BINDINGS = {{
     {0, vk::DescriptorType::eUniformBufferDynamic, 1, vk::ShaderStageFlagBits::eVertex},
     {1, vk::DescriptorType::eUniformBufferDynamic, 1,
      vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eGeometry},
@@ -64,6 +66,8 @@ constexpr std::array<vk::DescriptorSetLayoutBinding, 6> BUFFER_BINDINGS = {{
     {3, vk::DescriptorType::eUniformTexelBuffer, 1, vk::ShaderStageFlagBits::eFragment},
     {4, vk::DescriptorType::eUniformTexelBuffer, 1, vk::ShaderStageFlagBits::eFragment},
     {5, vk::DescriptorType::eUniformTexelBuffer, 1, vk::ShaderStageFlagBits::eFragment},
+    // Ubershader fs_config. Unused by specialized shaders.
+    {6, vk::DescriptorType::eUniformBufferDynamic, 1, vk::ShaderStageFlagBits::eFragment},
 }};
 
 template <u32 NumTex0>
@@ -126,6 +130,15 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         profile.vk_format_traits[i].aspect_flags = static_cast<u32>(it.aspect);
         profile.vk_format_traits[i].native_format = static_cast<u32>(it.native);
         ++i;
+    }
+
+    if (Settings::values.use_ubershaders.GetValue()) {
+        ubershader_fragment_shader = std::make_unique<Shader>(
+            instance, vk::ShaderStageFlagBits::eFragment,
+            std::string{HostShaders::VULKAN_UBERSHADER_FRAG});
+        if (!ubershader_fragment_shader->Handle()) {
+            LOG_ERROR(Render_Vulkan, "Ubershader failed to compile, ubershaders disabled");
+        }
     }
 
     BuildLayout();
@@ -540,7 +553,13 @@ bool PipelineCache::BindPipeline(PipelineInfo& info, bool wait_built) {
 
         if (pipeline_dirty) {
             if (!pipeline->IsDone()) {
+                const auto start = std::chrono::steady_clock::now();
                 pipeline->WaitDone();
+                const auto waited = std::chrono::steady_clock::now() - start;
+                wait_count.fetch_add(1, std::memory_order_relaxed);
+                wait_ns.fetch_add(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count(),
+                    std::memory_order_relaxed);
             }
             cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
         }
@@ -638,6 +657,25 @@ void PipelineCache::UseFragmentShader(const Pica::RegsInternal& regs,
         current_shaders[ProgramType::FS] = (*res).second;
         shader_hashes[ProgramType::FS] = (*res).first;
     }
+}
+
+void PipelineCache::UseUbershaderFragmentShader() {
+    current_shaders[ProgramType::FS] = ubershader_fragment_shader.get();
+    shader_hashes[ProgramType::FS] = UBERSHADER_FS_HASH;
+}
+
+bool PipelineCache::IsPipelineReady(PipelineInfo& info) {
+    for (u32 i = 0; i < MAX_SHADER_STAGES; i++) {
+        info.state.shader_ids[i] = shader_hashes[i];
+    }
+    GraphicsPipeline* const pipeline = curr_disk_cache->GetPipeline(info);
+    return pipeline->IsDone() || pipeline->TryBuild(false);
+}
+
+Pica::Shader::FSConfig PipelineCache::MakeFSConfig(const Pica::RegsInternal& regs) const {
+    Pica::Shader::FSConfig config{regs};
+    config.ApplyProfile(profile);
+    return config;
 }
 
 void PipelineCache::QueryBlendEmulation(const Pica::RegsInternal& regs, bool& rgb_emulation,

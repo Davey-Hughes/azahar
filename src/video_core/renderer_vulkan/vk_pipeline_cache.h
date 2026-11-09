@@ -4,7 +4,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <bitset>
+#include <memory>
 #include <unordered_set>
 
 #include "video_core/rasterizer_interface.h"
@@ -39,7 +41,10 @@ enum class DescriptorHeapType : u32 {
 class PipelineCache {
     static constexpr u32 NumRasterizerSets = 3;
     static constexpr u32 NumDescriptorHeaps = 3;
-    static constexpr u32 NumDynamicOffsets = 3;
+    // Dynamic UBOs in set 0: b0 VS PICA, b1 VS, b2 FS, b6 ubershader fs_config. Vulkan orders
+    // dynamic offsets by binding, so fs_config's offset is index 3.
+    static constexpr u32 NumDynamicOffsets = 4;
+    static constexpr u32 FsConfigOffsetIndex = 3;
 
 public:
     explicit PipelineCache(const Instance& instance, Scheduler& scheduler,
@@ -57,6 +62,41 @@ public:
     /// Sets the dynamic offset for the uniform buffer at binding
     void UpdateRange(u8 binding, u32 offset) {
         offsets[binding] = offset;
+    }
+
+    /// Hash used for the ubershader fragment stage. Pipelines using it are never written to the
+    /// shader disk cache (ShaderDiskCache::GetPipeline()).
+    static constexpr u64 UBERSHADER_FS_HASH = 0x0BE70000'00000001ULL;
+
+    struct WaitStats {
+        u64 count;
+        u64 ns;
+    };
+
+    /// Sets the dynamic offset for the ubershader fs_config UBO (set 0, binding 6).
+    void UpdateFsConfigRange(u32 offset) {
+        offsets[FsConfigOffsetIndex] = offset;
+    }
+
+    /// True when the ubershader compiled at startup (only attempted with use_ubershaders on)
+    bool IsUbershaderAvailable() const {
+        return ubershader_fragment_shader && ubershader_fragment_shader->Handle();
+    }
+
+    /// Replaces the bound fragment shader with the ubershader
+    void UseUbershaderFragmentShader();
+
+    /// Returns true if the pipeline for the bound shaders and @p info is built. Queues the build
+    /// like an async BindPipeline() but records nothing.
+    bool IsPipelineReady(PipelineInfo& info);
+
+    /// Builds the fragment config for @p regs with this device's profile applied
+    Pica::Shader::FSConfig MakeFSConfig(const Pica::RegsInternal& regs) const;
+
+    /// Cumulative count and duration of render-thread waits on pipelines that were not built yet
+    WaitStats GetWaitStats() const {
+        return {wait_count.load(std::memory_order_relaxed),
+                wait_ns.load(std::memory_order_relaxed)};
     }
 
     /// Loads the driver pipeline cache and the disk shader cache
@@ -176,6 +216,9 @@ private:
     std::array<Shader*, MAX_SHADER_STAGES> current_shaders;
 
     Shader trivial_vertex_shader;
+    std::unique_ptr<Shader> ubershader_fragment_shader;
+    std::atomic<u64> wait_count{0};
+    std::atomic<u64> wait_ns{0};
 
     u64 current_program_id{0};
     std::vector<std::shared_ptr<ShaderDiskCache>> disk_caches;

@@ -17,6 +17,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/shader/generator/fs_config_uniform.h"
 #include "video_core/texture/texture_decode.h"
 
 namespace Vulkan {
@@ -120,6 +121,8 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
     update_queue.AddTexelBuffer(buffer_set, 3, *texture_lf_view);
     update_queue.AddTexelBuffer(buffer_set, 4, *texture_rg_view);
     update_queue.AddTexelBuffer(buffer_set, 5, *texture_rgba_view);
+    update_queue.AddBuffer(buffer_set, 6, uniform_buffer.Handle(), 0,
+                           sizeof(Pica::Shader::FSConfigUniformData));
 
     const auto texture_set = pipeline_cache.Acquire(DescriptorHeapType::Texture);
     Surface& null_surface = res_cache.GetSurface(VideoCore::NULL_SURFACE_ID);

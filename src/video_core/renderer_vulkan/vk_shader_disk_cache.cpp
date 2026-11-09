@@ -255,7 +255,11 @@ GraphicsPipeline* ShaderDiskCache::GetPipeline(const PipelineInfo& info) {
             *parent.pipeline_layout, parent.current_shaders, &parent.pipeline_workers);
     }
 
-    if (known_graphic_pipelines.emplace(hash).second) {
+    // Ubershader pipelines are transient stand-ins; their FS hash is not a cached shader, so an
+    // entry would fail to load with "Missing fragment shader" on every boot.
+    const bool is_ubershader =
+        info.state.shader_ids[ProgramType::FS] == PipelineCache::UBERSHADER_FS_HASH;
+    if (!is_ubershader && known_graphic_pipelines.emplace(hash).second) {
         LOG_NEW_OBJECT(Render_Vulkan, "New Pipeline {:016X}", hash);
 
         PLConfigEntry entry{
