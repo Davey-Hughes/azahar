@@ -141,6 +141,14 @@ static const char* android_config_default_file_content = (BOOST_HANA_STRING(R"(
 # 0: Off, 1: On (default)
 )") DECLARE_KEY(async_shader_compilation) BOOST_HANA_STRING(R"(
 
+# Draw with a generic fragment ubershader while shaders compile (Vulkan only, needs async_shader_compilation)
+# 0: Off (default), 1: On
+)") DECLARE_KEY(use_ubershaders) BOOST_HANA_STRING(R"(
+
+# Always use the CPU vertex path for ubershader draws (measurement only)
+# 0: Off (default), 1: On
+)") DECLARE_KEY(ubershader_cpu_vertex) BOOST_HANA_STRING(R"(
+
 # Whether to emit PICA fragment shader using SPIRV or GLSL (Vulkan only)
 # 0: GLSL, 1: SPIR-V (default)
 )") DECLARE_KEY(spirv_shader_gen) BOOST_HANA_STRING(R"(
