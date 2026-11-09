@@ -33,9 +33,14 @@ vk::ShaderStageFlagBits MakeShaderStage(std::size_t index) {
 }
 
 u64 StaticPipelineInfo::OptimizedHash(const Instance& instance) const {
+    // With dynamic blend, only blend_enable and logic_op are baked into the pipeline.
+    const u64 blend_hash = instance.IsExtendedDynamicState3Supported()
+                               ? Common::HashCombine(static_cast<u64>(blending.blend_enable),
+                                                     static_cast<u64>(blending.logic_op))
+                               : Common::ComputeStructHash64(blending);
     u64 info_hash = Common::HashCombine(
         shader_ids[0], shader_ids[1], shader_ids[2], Common::ComputeStructHash64(vertex_layout),
-        Common::ComputeStructHash64(attachments), Common::ComputeStructHash64(blending));
+        Common::ComputeStructHash64(attachments), blend_hash);
 
     if (!instance.IsExtendedDynamicStateSupported()) {
         info_hash = Common::HashCombine(info_hash, Common::ComputeStructHash64(rasterization),
@@ -56,6 +61,28 @@ u16 PipelineInfo::GetFinalColorWriteMask(const Instance& instance) {
         color_write_mask = 0;
     }
     return color_write_mask;
+}
+
+vk::ColorBlendEquationEXT MakeBlendEquation(const BlendingState& blending) {
+    vk::ColorBlendEquationEXT eq = {
+        .srcColorBlendFactor = PicaToVK::BlendFunc(blending.src_color_blend_factor),
+        .dstColorBlendFactor = PicaToVK::BlendFunc(blending.dst_color_blend_factor),
+        .colorBlendOp = PicaToVK::BlendEquation(blending.color_blend_eq),
+        .srcAlphaBlendFactor = PicaToVK::BlendFunc(blending.src_alpha_blend_factor),
+        .dstAlphaBlendFactor = PicaToVK::BlendFunc(blending.dst_alpha_blend_factor),
+        .alphaBlendOp = PicaToVK::BlendEquation(blending.alpha_blend_eq),
+    };
+    if (blending.rgb_blend_emulation) {
+        eq.srcColorBlendFactor = vk::BlendFactor::eOne;
+        eq.dstColorBlendFactor = vk::BlendFactor::eZero;
+        eq.colorBlendOp = vk::BlendOp::eAdd;
+    }
+    if (blending.alpha_blend_emulation) {
+        eq.srcAlphaBlendFactor = vk::BlendFactor::eOne;
+        eq.dstAlphaBlendFactor = vk::BlendFactor::eZero;
+        eq.alphaBlendOp = vk::BlendOp::eAdd;
+    }
+    return eq;
 }
 
 Shader::Shader(const Instance& instance) : device{instance.GetDevice()} {}
@@ -169,34 +196,15 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
     };
 
     const auto& blending = info.state.blending;
-    auto src_color_factor = PicaToVK::BlendFunc(blending.src_color_blend_factor);
-    auto dst_color_factor = PicaToVK::BlendFunc(blending.dst_color_blend_factor);
-    auto color_op = PicaToVK::BlendEquation(blending.color_blend_eq);
-    auto src_alpha_factor = PicaToVK::BlendFunc(blending.src_alpha_blend_factor);
-    auto dst_alpha_factor = PicaToVK::BlendFunc(blending.dst_alpha_blend_factor);
-    auto alpha_op = PicaToVK::BlendEquation(blending.alpha_blend_eq);
-
-    // Blending with min/max equations is emulated in the fragment shader so
-    // configure blending to not modify the incoming fragment color.
-    if (blending.rgb_blend_emulation) {
-        src_color_factor = vk::BlendFactor::eOne;
-        dst_color_factor = vk::BlendFactor::eZero;
-        color_op = vk::BlendOp::eAdd;
-    }
-    if (blending.alpha_blend_emulation) {
-        src_alpha_factor = vk::BlendFactor::eOne;
-        dst_alpha_factor = vk::BlendFactor::eZero;
-        alpha_op = vk::BlendOp::eAdd;
-    }
-
+    const vk::ColorBlendEquationEXT blend_eq = MakeBlendEquation(blending);
     const vk::PipelineColorBlendAttachmentState colorblend_attachment = {
         .blendEnable = blending.blend_enable,
-        .srcColorBlendFactor = src_color_factor,
-        .dstColorBlendFactor = dst_color_factor,
-        .colorBlendOp = color_op,
-        .srcAlphaBlendFactor = src_alpha_factor,
-        .dstAlphaBlendFactor = dst_alpha_factor,
-        .alphaBlendOp = alpha_op,
+        .srcColorBlendFactor = blend_eq.srcColorBlendFactor,
+        .dstColorBlendFactor = blend_eq.dstColorBlendFactor,
+        .colorBlendOp = blend_eq.colorBlendOp,
+        .srcAlphaBlendFactor = blend_eq.srcAlphaBlendFactor,
+        .dstAlphaBlendFactor = blend_eq.dstAlphaBlendFactor,
+        .alphaBlendOp = blend_eq.alphaBlendOp,
         .colorWriteMask =
             static_cast<vk::ColorComponentFlags>(info.GetFinalColorWriteMask(instance)),
     };
@@ -230,7 +238,7 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         .pScissors = &scissor,
     };
 
-    boost::container::static_vector<vk::DynamicState, 14> dynamic_states = {
+    boost::container::static_vector<vk::DynamicState, 16> dynamic_states = {
         vk::DynamicState::eViewport,           vk::DynamicState::eScissor,
         vk::DynamicState::eStencilCompareMask, vk::DynamicState::eStencilWriteMask,
         vk::DynamicState::eStencilReference,   vk::DynamicState::eBlendConstants,
@@ -244,6 +252,14 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
             vk::DynamicState::eStencilOpEXT,       vk::DynamicState::eStencilTestEnableEXT,
         };
         dynamic_states.insert(dynamic_states.end(), extended.begin(), extended.end());
+    }
+
+    if (instance.IsExtendedDynamicState3Supported()) {
+        constexpr std::array dynamic_blend = {
+            vk::DynamicState::eColorBlendEquationEXT,
+            vk::DynamicState::eColorWriteMaskEXT,
+        };
+        dynamic_states.insert(dynamic_states.end(), dynamic_blend.begin(), dynamic_blend.end());
     }
 
     const vk::PipelineDynamicStateCreateInfo dynamic_info = {

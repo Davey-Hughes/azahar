@@ -300,6 +300,10 @@ struct PipelineInfo : Common::HashableStruct<StaticPipelineInfo> {
     [[nodiscard]] u16 GetFinalColorWriteMask(const Instance& instance);
 };
 
+/// Converts PICA blend state to Vulkan, applying the min/max emulation override: when min/max is
+/// emulated in the fragment shader, the fixed-function blend must pass the fragment through.
+[[nodiscard]] vk::ColorBlendEquationEXT MakeBlendEquation(const BlendingState& blending);
+
 struct Shader : public Common::AsyncHandle {
     explicit Shader(const Instance& instance);
     explicit Shader(const Instance& instance, vk::ShaderStageFlagBits stage, std::string code);

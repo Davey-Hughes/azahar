@@ -403,7 +403,8 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceRobustness2FeaturesEXT,
         vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT,
         vk::PhysicalDevicePipelineCreationCacheControlFeaturesEXT,
-        vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR>();
+        vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR,
+        vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT>();
     const vk::StructureChain properties_chain =
         physical_device
             .getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceDriverProperties,
@@ -479,6 +480,11 @@ bool Instance::CreateDevice() {
     const bool has_fragment_shader_barycentric =
         add_extension(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, is_moltenvk,
                       "the PerVertexKHR attribute is not supported by MoltenVK");
+    // Dynamic blend lets one ubershader pipeline cover every blend mode. It changes how every
+    // pipeline is built, so keep it off unless the ubershader is on.
+    const bool has_extended_dynamic_state3 =
+        Settings::values.use_ubershaders.GetValue() &&
+        add_extension(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
 
     const auto family_properties = physical_device.getQueueFamilyProperties();
     if (family_properties.empty()) {
@@ -540,6 +546,7 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT{},
         vk::PhysicalDevicePipelineCreationCacheControlFeaturesEXT{},
         vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR{},
+        vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT{},
     };
 
 #define PROP_GET(structName, prop, property) property = properties_chain.get<structName>().prop;
@@ -595,6 +602,20 @@ bool Instance::CreateDevice() {
                  extended_dynamic_state)
     } else {
         device_chain.unlink<vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>();
+    }
+
+    const auto& eds3_features =
+        feature_chain.get<vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT>();
+    if (has_extended_dynamic_state3 && eds3_features.extendedDynamicState3ColorBlendEquation &&
+        eds3_features.extendedDynamicState3ColorWriteMask) {
+        extended_dynamic_state3 = true;
+        auto& eds3 = device_chain.get<vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT>();
+        eds3.extendedDynamicState3ColorBlendEquation = true;
+        eds3.extendedDynamicState3ColorWriteMask = true;
+        LOG_INFO(Render_Vulkan, "EDS3 dynamic blend enabled");
+    } else {
+        device_chain.unlink<vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT>();
+        LOG_INFO(Render_Vulkan, "EDS3 dynamic blend unavailable or disabled");
     }
 
     if (has_custom_border_color) {

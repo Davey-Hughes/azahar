@@ -420,13 +420,19 @@ bool PipelineCache::BindPipeline(PipelineInfo& info, bool wait_built) {
 
     const bool is_dirty = scheduler.IsStateDirty(StateFlags::Pipeline);
     const bool pipeline_dirty = (current_pipeline != pipeline) || is_dirty;
+    const bool dynamic_blend = instance.IsExtendedDynamicState3Supported();
+    const u16 write_mask = dynamic_blend ? info.GetFinalColorWriteMask(instance) : u16{0};
+    const u16 current_write_mask =
+        dynamic_blend ? current_info.GetFinalColorWriteMask(instance) : u16{0};
     scheduler.Record([this, is_dirty, pipeline_dirty, pipeline,
                       current_dynamic = current_info.dynamic_info, dynamic = info.dynamic_info,
                       descriptor_sets = bound_descriptor_sets, offsets = offsets,
                       current_rasterization = current_info.state.rasterization,
                       current_depth_stencil = current_info.state.depth_stencil,
                       rasterization = info.state.rasterization,
-                      depth_stencil = info.state.depth_stencil](vk::CommandBuffer cmdbuf) {
+                      depth_stencil = info.state.depth_stencil, dynamic_blend, write_mask,
+                      current_write_mask, blending = info.state.blending,
+                      current_blending = current_info.state.blending](vk::CommandBuffer cmdbuf) {
         if (dynamic.viewport != current_dynamic.viewport || is_dirty) {
             const vk::Viewport vk_viewport = {
                 .x = static_cast<f32>(dynamic.viewport.left),
@@ -518,6 +524,17 @@ bool PipelineCache::BindPipeline(PipelineInfo& info, bool wait_built) {
                                        PicaToVK::StencilOp(depth_stencil.stencil_pass_op),
                                        PicaToVK::StencilOp(depth_stencil.stencil_depth_fail_op),
                                        PicaToVK::CompareFunc(depth_stencil.stencil_compare_op));
+            }
+        }
+
+        if (dynamic_blend) {
+            if (blending.value != current_blending.value || is_dirty) {
+                cmdbuf.setColorBlendEquationEXT(0, MakeBlendEquation(blending));
+            }
+            // Compare final masks: GetFinalColorWriteMask() zeroes the mask for an emulated NoOp
+            // logic op, so two draws can share a raw mask but need different final ones.
+            if (write_mask != current_write_mask || is_dirty) {
+                cmdbuf.setColorWriteMaskEXT(0, static_cast<vk::ColorComponentFlags>(write_mask));
             }
         }
 
