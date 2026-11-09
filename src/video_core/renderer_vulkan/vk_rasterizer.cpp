@@ -2,6 +2,8 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <optional>
+
 #include "common/alignment.h"
 #include "common/literals.h"
 #include "common/logging/log.h"
@@ -649,6 +651,7 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
 
     bool use_ubershader = false;
     bool force_wait = false;
+    std::optional<Pica::Shader::FSConfig> uber_fs_config;
     if (accelerate && use_ubershaders && regs.pipeline.num_vertices > 6 &&
         !pipeline_cache.IsPipelineReady(pipeline_info)) {
         const auto fs_config = pipeline_cache.MakeFSConfig(regs);
@@ -660,12 +663,13 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
         } else {
             pipeline_cache.UseUbershaderFragmentShader();
             if (!ubershader_cpu_vertex && pipeline_cache.IsPipelineReady(pipeline_info)) {
-                // Design A: game vertex shader + ubershader on the GPU.
+                // GPU vertex path: the game's vertex shader with the ubershader on the GPU.
                 use_ubershader = true;
+                uber_fs_config = fs_config;
                 ++uber_stats.uber_gpu;
             } else {
-                // Design B, or A's pipeline isn't built yet: PICA runs the vertex shader on
-                // the CPU (PicaCore::DrawArrays(), pica_core.cpp) and calls DrawTriangles().
+                // CPU vertex path, or the GPU vertex path's pipeline isn't built yet: PICA runs
+                // the vertex shader on the CPU (PicaCore::DrawArrays(), pica_core.cpp) and calls DrawTriangles().
                 ubershader_fallback_pending = true;
                 return false;
             }
@@ -673,6 +677,7 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     } else if (fallback_draw) {
         pipeline_cache.UseUbershaderFragmentShader();
         use_ubershader = true;
+        uber_fs_config = pipeline_cache.MakeFSConfig(regs);
     }
 
     // Sync and bind the texture surfaces
@@ -682,10 +687,12 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     // Sync the LUTs within the texture buffer
     SyncAndUploadLUTs();
     SyncAndUploadLUTsLF();
-    UploadUniforms(accelerate);
+    // Upload the fs_config block first: it can wrap the uniform buffer, and UploadUniforms()
+    // then re-uploads its blocks in the same draw.
     if (use_ubershader) {
-        UploadFsConfig(pipeline_cache.MakeFSConfig(regs));
+        UploadFsConfig(*uber_fs_config);
     }
+    UploadUniforms(accelerate);
 
     // Begin rendering
     renderpass_cache.BeginRendering(framebuffer, draw_rect);
@@ -1155,6 +1162,13 @@ void RasterizerVulkan::UploadUniforms(bool accelerate_draw) {
 void RasterizerVulkan::UploadFsConfig(const Pica::Shader::FSConfig& config) {
     const auto data = Pica::Shader::BuildFSConfigUniform(config);
     auto [ptr, offset, invalidate] = uniform_buffer.Map(sizeof(data), uniform_buffer_alignment);
+    if (invalidate) {
+        // The wrap leaves the bound VS-PICA, VS and FS uniform offsets pointing into the previous
+        // lap. Mark them dirty so RasterizerVulkan::UploadUniforms() re-uploads them.
+        vs_data_dirty = true;
+        fs_data_dirty = true;
+        pica.vs_setup.uniforms_dirty = true;
+    }
     std::memcpy(ptr, &data, sizeof(data));
     uniform_buffer.Commit(sizeof(data));
     pipeline_cache.UpdateFsConfigRange(static_cast<u32>(offset));

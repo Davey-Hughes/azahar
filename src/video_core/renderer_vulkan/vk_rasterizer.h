@@ -153,8 +153,9 @@ private:
     bool async_shaders{false};
     bool use_ubershaders{false};
     bool ubershader_cpu_vertex{false};
-    // Set by an accelerated draw that is handing itself to the CPU vertex path; consumed by the
-    // next RasterizerVulkan::Draw() with accelerate == false.
+    // Set by an accelerated draw that hands itself to the CPU vertex path. Read and cleared at the
+    // top of the next RasterizerVulkan::Draw(), and also cleared by an empty
+    // RasterizerVulkan::DrawTriangles().
     bool ubershader_fallback_pending{false};
 
     struct UbershaderStats {
