@@ -242,6 +242,11 @@ GraphicsPipeline* ShaderDiskCache::GetPipeline(const PipelineInfo& info) {
 
     auto [it, new_pipeline] = graphics_pipelines.try_emplace(optimized_hash);
     if (new_pipeline) {
+        if (info.state.shader_ids[ProgramType::FS] == PipelineCache::UBERSHADER_FS_HASH) {
+            parent.ubershader_pipeline_count.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            parent.specialized_pipeline_count.fetch_add(1, std::memory_order_relaxed);
+        }
         if (!parent.instance.UseGeometryShaders() ||
             parent.instance.IsFragmentShaderBarycentricSupported()) {
             // If we don't need geometry shaders disable

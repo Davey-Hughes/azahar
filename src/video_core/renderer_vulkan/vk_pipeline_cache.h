@@ -73,6 +73,11 @@ public:
         u64 ns;
     };
 
+    struct PipelineCounts {
+        u64 specialized;
+        u64 ubershader;
+    };
+
     /// Sets the dynamic offset for the ubershader fs_config UBO (set 0, binding 6).
     void UpdateFsConfigRange(u32 offset) {
         offsets[FsConfigOffsetIndex] = offset;
@@ -93,10 +98,18 @@ public:
     /// Builds the fragment config for @p regs with this device's profile applied
     Pica::Shader::FSConfig MakeFSConfig(const Pica::RegsInternal& regs) const;
 
-    /// Cumulative count and duration of render-thread waits on pipelines that were not built yet
+    /// Cumulative count and duration of waits on pipelines that were not built yet. The waits are
+    /// timed on the scheduler's recording (worker) thread; the emulation thread feels them at the
+    /// next Scheduler::WaitWorker().
     WaitStats GetWaitStats() const {
         return {wait_count.load(std::memory_order_relaxed),
                 wait_ns.load(std::memory_order_relaxed)};
+    }
+
+    /// Cumulative count of pipelines created at runtime (not loaded from the disk cache)
+    PipelineCounts GetPipelineCounts() const {
+        return {specialized_pipeline_count.load(std::memory_order_relaxed),
+                ubershader_pipeline_count.load(std::memory_order_relaxed)};
     }
 
     /// Loads the driver pipeline cache and the disk shader cache
@@ -219,6 +232,8 @@ private:
     std::unique_ptr<Shader> ubershader_fragment_shader;
     std::atomic<u64> wait_count{0};
     std::atomic<u64> wait_ns{0};
+    std::atomic<u64> specialized_pipeline_count{0};
+    std::atomic<u64> ubershader_pipeline_count{0};
 
     u64 current_program_id{0};
     std::vector<std::shared_ptr<ShaderDiskCache>> disk_caches;

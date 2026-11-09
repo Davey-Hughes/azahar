@@ -141,7 +141,8 @@ public:
         return extended_dynamic_state;
     }
 
-    /// Returns true when blend equation and color write mask are dynamic (VK_EXT_extended_dynamic_state3).
+    /// Returns true when blend equation and color write mask are dynamic
+    /// (VK_EXT_extended_dynamic_state3).
     /// Only enabled together with Settings::values.use_ubershaders.
     bool IsExtendedDynamicState3Supported() const {
         return extended_dynamic_state3;

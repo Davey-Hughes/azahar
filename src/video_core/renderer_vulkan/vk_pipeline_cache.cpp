@@ -133,9 +133,9 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     }
 
     if (Settings::values.use_ubershaders.GetValue()) {
-        ubershader_fragment_shader = std::make_unique<Shader>(
-            instance, vk::ShaderStageFlagBits::eFragment,
-            std::string{HostShaders::VULKAN_UBERSHADER_FRAG});
+        ubershader_fragment_shader =
+            std::make_unique<Shader>(instance, vk::ShaderStageFlagBits::eFragment,
+                                     std::string{HostShaders::VULKAN_UBERSHADER_FRAG});
         if (!ubershader_fragment_shader->Handle()) {
             LOG_ERROR(Render_Vulkan, "Ubershader failed to compile, ubershaders disabled");
         }

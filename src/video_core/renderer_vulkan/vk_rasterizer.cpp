@@ -175,12 +175,13 @@ void RasterizerVulkan::TickFrame() {
 
 void RasterizerVulkan::LogUbershaderStats() const {
     const auto waits = pipeline_cache.GetWaitStats();
+    const auto pipelines = pipeline_cache.GetPipelineCounts();
     LOG_INFO(Render_Vulkan,
              "Ubershader stats: frames={} slow_frames={} waits={} wait_ms={} skipped={} "
-             "uber_gpu={} uber_cpu={} unsupported={}",
+             "uber_gpu={} uber_cpu={} unsupported={} pipelines={} uber_pipelines={}",
              uber_stats.frames, uber_stats.slow_frames, waits.count, waits.ns / 1'000'000,
-             uber_stats.skipped, uber_stats.uber_gpu, uber_stats.uber_cpu,
-             uber_stats.unsupported);
+             uber_stats.skipped, uber_stats.uber_gpu, uber_stats.uber_cpu, uber_stats.unsupported,
+             pipelines.specialized, pipelines.ubershader);
 }
 
 void RasterizerVulkan::LoadDefaultDiskResources(
@@ -599,8 +600,8 @@ void RasterizerVulkan::DrawTriangles() {
 bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     MICROPROFILE_SCOPE(Vulkan_Drawing);
 
-    // A software draw that an accelerated attempt handed over (design B, or design A whose
-    // ubershader pipeline wasn't ready). Always clear the flag so it can't leak.
+    // A software draw that an accelerated attempt handed over (the CPU vertex path, or the GPU
+    // vertex path whose ubershader pipeline wasn't ready). Always clear the flag so it can't leak.
     const bool fallback_draw = !accelerate && ubershader_fallback_pending;
     ubershader_fallback_pending = false;
 
@@ -649,7 +650,6 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     // to the CPU vertex path can leave before doing that work twice.
     pipeline_cache.UseFragmentShader(regs, user_config);
 
-    bool use_ubershader = false;
     bool force_wait = false;
     std::optional<Pica::Shader::FSConfig> uber_fs_config;
     if (accelerate && use_ubershaders && regs.pipeline.num_vertices > 6 &&
@@ -664,19 +664,18 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
             pipeline_cache.UseUbershaderFragmentShader();
             if (!ubershader_cpu_vertex && pipeline_cache.IsPipelineReady(pipeline_info)) {
                 // GPU vertex path: the game's vertex shader with the ubershader on the GPU.
-                use_ubershader = true;
                 uber_fs_config = fs_config;
                 ++uber_stats.uber_gpu;
             } else {
                 // CPU vertex path, or the GPU vertex path's pipeline isn't built yet: PICA runs
-                // the vertex shader on the CPU (PicaCore::DrawArrays(), pica_core.cpp) and calls DrawTriangles().
+                // the vertex shader on the CPU (PicaCore::DrawArrays() in
+                // src/video_core/pica/pica_core.cpp) and calls DrawTriangles().
                 ubershader_fallback_pending = true;
                 return false;
             }
         }
     } else if (fallback_draw) {
         pipeline_cache.UseUbershaderFragmentShader();
-        use_ubershader = true;
         uber_fs_config = pipeline_cache.MakeFSConfig(regs);
     }
 
@@ -689,7 +688,7 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     SyncAndUploadLUTsLF();
     // Upload the fs_config block first: it can wrap the uniform buffer, and UploadUniforms()
     // then re-uploads its blocks in the same draw.
-    if (use_ubershader) {
+    if (uber_fs_config) {
         UploadFsConfig(*uber_fs_config);
     }
     UploadUniforms(accelerate);
