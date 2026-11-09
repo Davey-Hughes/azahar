@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <chrono>
+
 #include "video_core/rasterizer_accelerated.h"
 #include "video_core/renderer_vulkan/vk_descriptor_update_queue.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -91,11 +93,17 @@ private:
     /// Upload the uniform blocks to the uniform buffer object
     void UploadUniforms(bool accelerate_draw);
 
+    /// Uploads the ubershader fs_config block for @p config and sets its dynamic offset
+    void UploadFsConfig(const Pica::Shader::FSConfig& config);
+
+    /// Logs the cumulative ubershader counters
+    void LogUbershaderStats() const;
+
     /// Generic draw function for DrawTriangles and AccelerateDrawBatch
     bool Draw(bool accelerate, bool is_indexed);
 
     /// Internal implementation for AccelerateDrawBatch
-    bool AccelerateDrawBatchInternal(bool is_indexed);
+    bool AccelerateDrawBatchInternal(bool is_indexed, bool force_wait);
 
     /// Setup index array for AccelerateDrawBatch
     void SetupIndexArray();
@@ -143,6 +151,21 @@ private:
     u32 uniform_size_aligned_vs;
     u32 uniform_size_aligned_fs;
     bool async_shaders{false};
+    bool use_ubershaders{false};
+    bool ubershader_cpu_vertex{false};
+    // Set by an accelerated draw that is handing itself to the CPU vertex path; consumed by the
+    // next RasterizerVulkan::Draw() with accelerate == false.
+    bool ubershader_fallback_pending{false};
+
+    struct UbershaderStats {
+        u64 frames{};
+        u64 slow_frames{};
+        u64 skipped{};
+        u64 uber_gpu{};
+        u64 uber_cpu{};
+        u64 unsupported{};
+    } uber_stats;
+    std::chrono::steady_clock::time_point last_frame_time{};
 };
 
 } // namespace Vulkan

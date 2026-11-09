@@ -76,7 +76,9 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
                      TextureBufferSize(instance)},
       texture_lf_buffer{instance, scheduler, vk::BufferUsageFlagBits::eUniformTexelBuffer,
                         TextureBufferSize(instance)},
-      async_shaders{Settings::values.async_shader_compilation.GetValue()} {
+      async_shaders{Settings::values.async_shader_compilation.GetValue()},
+      use_ubershaders{async_shaders && Settings::values.use_ubershaders.GetValue()},
+      ubershader_cpu_vertex{Settings::values.ubershader_cpu_vertex.GetValue()} {
 
     vertex_buffers.fill(stream_buffer.Handle());
 
@@ -142,13 +144,41 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
     update_queue.AddStorageImage(utility_set, 0, null_surface_storage_view);
     update_queue.AddImageSampler(utility_set, 1, 0, null_surface_view, null_sampler.Handle());
     update_queue.Flush();
+
+    if (use_ubershaders && !pipeline_cache.IsUbershaderAvailable()) {
+        use_ubershaders = false;
+    }
+    LOG_INFO(Render_Vulkan, "Ubershaders: {} (cpu vertex: {})", use_ubershaders,
+             ubershader_cpu_vertex);
 }
 
-RasterizerVulkan::~RasterizerVulkan() = default;
+RasterizerVulkan::~RasterizerVulkan() {
+    LogUbershaderStats();
+}
 
 void RasterizerVulkan::TickFrame() {
     scheduler.WaitWorker();
     res_cache.TickFrame();
+
+    const auto now = std::chrono::steady_clock::now();
+    if (last_frame_time.time_since_epoch().count() != 0 &&
+        now - last_frame_time > std::chrono::milliseconds{50}) {
+        ++uber_stats.slow_frames;
+    }
+    last_frame_time = now;
+    if (++uber_stats.frames % 600 == 0) {
+        LogUbershaderStats();
+    }
+}
+
+void RasterizerVulkan::LogUbershaderStats() const {
+    const auto waits = pipeline_cache.GetWaitStats();
+    LOG_INFO(Render_Vulkan,
+             "Ubershader stats: frames={} slow_frames={} waits={} wait_ms={} skipped={} "
+             "uber_gpu={} uber_cpu={} unsupported={}",
+             uber_stats.frames, uber_stats.slow_frames, waits.count, waits.ns / 1'000'000,
+             uber_stats.skipped, uber_stats.uber_gpu, uber_stats.uber_cpu,
+             uber_stats.unsupported);
 }
 
 void RasterizerVulkan::LoadDefaultDiskResources(
@@ -486,13 +516,14 @@ bool RasterizerVulkan::AccelerateDrawBatch(bool is_indexed) {
     return Draw(true, is_indexed);
 }
 
-bool RasterizerVulkan::AccelerateDrawBatchInternal(bool is_indexed) {
+bool RasterizerVulkan::AccelerateDrawBatchInternal(bool is_indexed, bool force_wait) {
     if (is_indexed) {
         SetupIndexArray();
     }
 
-    const bool wait_built = !async_shaders || regs.pipeline.num_vertices <= 6;
+    const bool wait_built = force_wait || !async_shaders || regs.pipeline.num_vertices <= 6;
     if (!pipeline_cache.BindPipeline(pipeline_info, wait_built)) {
+        ++uber_stats.skipped;
         return true;
     }
 
@@ -550,6 +581,7 @@ void RasterizerVulkan::SetupIndexArray() {
 
 void RasterizerVulkan::DrawTriangles() {
     if (vertex_batch.empty()) {
+        ubershader_fallback_pending = false;
         return;
     }
 
@@ -564,6 +596,12 @@ void RasterizerVulkan::DrawTriangles() {
 
 bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     MICROPROFILE_SCOPE(Vulkan_Drawing);
+
+    // A software draw that an accelerated attempt handed over (design B, or design A whose
+    // ubershader pipeline wasn't ready). Always clear the flag so it can't leak.
+    const bool fallback_draw = !accelerate && ubershader_fallback_pending;
+    ubershader_fallback_pending = false;
+
     SyncDrawState();
 
     const bool shadow_rendering = regs.framebuffer.IsShadowRendering();
@@ -605,17 +643,49 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
         fs_data_dirty = true;
     }
 
+    // Pick the fragment shader before the texture and uniform work, so a draw that hands itself
+    // to the CPU vertex path can leave before doing that work twice.
+    pipeline_cache.UseFragmentShader(regs, user_config);
+
+    bool use_ubershader = false;
+    bool force_wait = false;
+    if (accelerate && use_ubershaders && regs.pipeline.num_vertices > 6 &&
+        !pipeline_cache.IsPipelineReady(pipeline_info)) {
+        const auto fs_config = pipeline_cache.MakeFSConfig(regs);
+        if (!Pica::Shader::UbershaderSupports(fs_config, user_config)) {
+            // A feature the ubershader lacks: wait for the real pipeline, as upstream does
+            // without async compilation.
+            ++uber_stats.unsupported;
+            force_wait = true;
+        } else {
+            pipeline_cache.UseUbershaderFragmentShader();
+            if (!ubershader_cpu_vertex && pipeline_cache.IsPipelineReady(pipeline_info)) {
+                // Design A: game vertex shader + ubershader on the GPU.
+                use_ubershader = true;
+                ++uber_stats.uber_gpu;
+            } else {
+                // Design B, or A's pipeline isn't built yet: PICA runs the vertex shader on
+                // the CPU (PicaCore::DrawArrays(), pica_core.cpp) and calls DrawTriangles().
+                ubershader_fallback_pending = true;
+                return false;
+            }
+        }
+    } else if (fallback_draw) {
+        pipeline_cache.UseUbershaderFragmentShader();
+        use_ubershader = true;
+    }
+
     // Sync and bind the texture surfaces
     SyncTextureUnits(framebuffer);
     SyncUtilityTextures(framebuffer);
-
-    // Sync and bind the shader
-    pipeline_cache.UseFragmentShader(regs, user_config);
 
     // Sync the LUTs within the texture buffer
     SyncAndUploadLUTs();
     SyncAndUploadLUTsLF();
     UploadUniforms(accelerate);
+    if (use_ubershader) {
+        UploadFsConfig(pipeline_cache.MakeFSConfig(regs));
+    }
 
     // Begin rendering
     renderpass_cache.BeginRendering(framebuffer, draw_rect);
@@ -633,9 +703,17 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     // Draw the vertex batch
     bool succeeded = true;
     if (accelerate) {
-        succeeded = AccelerateDrawBatchInternal(is_indexed);
+        succeeded = AccelerateDrawBatchInternal(is_indexed, force_wait);
+    } else if (fallback_draw && !pipeline_cache.BindPipeline(pipeline_info, false)) {
+        // Even the trivial VS + ubershader pipeline isn't built yet: skip, as async
+        // compilation does today.
+        ++uber_stats.skipped;
     } else {
-        pipeline_cache.BindPipeline(pipeline_info, true);
+        if (fallback_draw) {
+            ++uber_stats.uber_cpu;
+        } else {
+            pipeline_cache.BindPipeline(pipeline_info, true);
+        }
 
         const u32 vertex_count = static_cast<u32>(vertex_batch.size());
         const u32 vertex_size = vertex_count * sizeof(HardwareVertex);
@@ -1072,6 +1150,14 @@ void RasterizerVulkan::UploadUniforms(bool accelerate_draw) {
     }
 
     uniform_buffer.Commit(used_bytes);
+}
+
+void RasterizerVulkan::UploadFsConfig(const Pica::Shader::FSConfig& config) {
+    const auto data = Pica::Shader::BuildFSConfigUniform(config);
+    auto [ptr, offset, invalidate] = uniform_buffer.Map(sizeof(data), uniform_buffer_alignment);
+    std::memcpy(ptr, &data, sizeof(data));
+    uniform_buffer.Commit(sizeof(data));
+    pipeline_cache.UpdateFsConfigRange(static_cast<u32>(offset));
 }
 
 bool RasterizerVulkan::DiskResourcesLoadCrashed(u64 title_id) {
