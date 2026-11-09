@@ -668,7 +668,13 @@ bool PipelineCache::IsPipelineReady(PipelineInfo& info) {
     for (u32 i = 0; i < MAX_SHADER_STAGES; i++) {
         info.state.shader_ids[i] = shader_hashes[i];
     }
+    // ShaderDiskCache::GetPipeline() (vk_shader_disk_cache.cpp) can clear the geometry shader when
+    // it creates a pipeline; keep it so the next lookup in this draw hashes the same stages.
+    Shader* const geometry_shader = current_shaders[ProgramType::GS];
+    const u64 geometry_hash = shader_hashes[ProgramType::GS];
     GraphicsPipeline* const pipeline = curr_disk_cache->GetPipeline(info);
+    current_shaders[ProgramType::GS] = geometry_shader;
+    shader_hashes[ProgramType::GS] = geometry_hash;
     return pipeline->IsDone() || pipeline->TryBuild(false);
 }
 
