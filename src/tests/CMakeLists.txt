@@ -23,6 +23,11 @@ add_executable(tests
     audio_core/merryhime_3ds_audio/audio_test_biquad_filter.cpp
 )
 
+if (ENABLE_QT) # citra_cli is only built alongside a frontend
+    target_sources(tests PRIVATE citra_cli/citra_cli.cpp)
+    target_link_libraries(tests PRIVATE citra_cli)
+endif()
+
 create_target_directory_groups(tests)
 
 if (BSD STREQUAL "NetBSD")
