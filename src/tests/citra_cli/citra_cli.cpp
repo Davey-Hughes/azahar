@@ -23,6 +23,51 @@ bool CheckForCLIOptions(std::array<char*, N>& argv) {
 
 } // Anonymous namespace
 
+TEST_CASE("CheckForOptions ignores long options", "[citra_cli]") {
+    auto fullscreen = MakeArgv("--fullscreen", "rom.3ds");
+    REQUIRE_FALSE(CheckForCLIOptions(fullscreen));
+
+    auto version = MakeArgv("--version");
+    REQUIRE_FALSE(CheckForCLIOptions(version));
+
+    auto room = MakeArgv("--room");
+    REQUIRE_FALSE(CheckForCLIOptions(room));
+
+    auto movie_record = MakeArgv("--movie-record", "movie.ctm", "rom.3ds");
+    REQUIRE_FALSE(CheckForCLIOptions(movie_record));
+
+    auto gdbport = MakeArgv("--gdbport", "24689", "rom.3ds");
+    REQUIRE_FALSE(CheckForCLIOptions(gdbport));
+
+    auto attached_value = MakeArgv("--movie-record=cool.ctm", "rom.3ds");
+    REQUIRE_FALSE(CheckForCLIOptions(attached_value));
+}
+
+TEST_CASE("CheckForOptions stops at the end of options", "[citra_cli]") {
+    auto argv = MakeArgv("--", "-c", "rom.3ds");
+    REQUIRE_FALSE(CheckForCLIOptions(argv));
+}
+
+TEST_CASE("CheckForOptions detects compression options", "[citra_cli]") {
+    auto compress = MakeArgv("-c", "rom.3ds");
+    REQUIRE(CheckForCLIOptions(compress));
+
+    auto compress_attached = MakeArgv("-crom.3ds");
+    REQUIRE(CheckForCLIOptions(compress_attached));
+
+    auto decompress = MakeArgv("-x", "rom.zcci", "-o", "out");
+    REQUIRE(CheckForCLIOptions(decompress));
+
+    auto after_non_option = MakeArgv("rom.3ds", "-c", "other.3ds");
+    REQUIRE(CheckForCLIOptions(after_non_option));
+
+    auto after_long_option = MakeArgv("--fullscreen", "-c", "rom.3ds");
+    REQUIRE(CheckForCLIOptions(after_long_option));
+
+    auto after_attached_value = MakeArgv("--gdbport=24689", "-c", "rom.3ds");
+    REQUIRE(CheckForCLIOptions(after_attached_value));
+}
+
 TEST_CASE("CheckForOptions leaves argv unchanged", "[citra_cli]") {
     auto gdbport = MakeArgv("-g", "24689", "-f", "rom.3ds");
     const auto gdbport_before = gdbport;

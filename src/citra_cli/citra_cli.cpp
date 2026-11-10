@@ -20,12 +20,16 @@ bool CheckForOptions(const char* optstring, int argc, char* argv[]) {
     std::vector<char*> args(argv, argv + argc);
     args.push_back(nullptr);
 
+    // Use getopt_long with no long options so that e.g. "--fullscreen" is skipped as a single
+    // unknown option, rather than being parsed by getopt as the short options "-f -u -l -l -s -c".
+    static const struct option no_long_opts[] = {{nullptr, 0, nullptr, 0}};
+
     const int original_opterr = opterr;
     opterr = 0; // Temporarily suppress invalid option messages
 
     bool return_value = false;
     int option;
-    while ((option = getopt(argc, args.data(), optstring)) != -1) {
+    while ((option = getopt_long(argc, args.data(), optstring, no_long_opts, nullptr)) != -1) {
         for (size_t i = 0; optstring[i] != '\0'; ++i) {
             if (optstring[i] == ':') {
                 continue;
