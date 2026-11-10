@@ -51,8 +51,13 @@ static bool perform_z3ds_operation(bool is_compressing, const std::string& src_f
 CompressionOptions ParseCompressionOptions(int argc, char* argv[]) {
     CompressionOptions options;
 
+    // Use getopt_long_only like CheckForOptions() in src/citra_cli/citra_cli.cpp does, so that
+    // frontend options such as "--fullscreen" are skipped instead of being read as -c, -x or -o.
+    static const struct option no_long_opts[] = {{nullptr, 0, nullptr, 0}};
+
     int option;
-    while ((option = getopt(argc, argv, compression_ops_optstring)) != -1) {
+    while ((option = getopt_long_only(argc, argv, compression_ops_optstring, no_long_opts,
+                                      nullptr)) != -1) {
         switch (option) {
         case 'c':
             options.compress_path = optarg;

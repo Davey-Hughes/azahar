@@ -113,6 +113,28 @@ TEST_CASE("ParseCompressionOptions reads compression options", "[citra_cli]") {
     REQUIRE_FALSE(decompress_options.output_dir_path.has_value());
 }
 
+TEST_CASE("ParseCompressionOptions ignores frontend options", "[citra_cli]") {
+    auto fullscreen = MakeArgv("-c", "rom.3ds", "--fullscreen");
+    const auto fullscreen_parsed = ParseCompressionCLIOptions(fullscreen);
+    REQUIRE(fullscreen_parsed.compress_path == "rom.3ds");
+    REQUIRE_FALSE(fullscreen_parsed.output_dir_path.has_value());
+
+    auto movie_record = MakeArgv("--movie-record", "movie.ctm", "-x", "rom.zcci");
+    const auto movie_record_parsed = ParseCompressionCLIOptions(movie_record);
+    REQUIRE(movie_record_parsed.decompress_path == "rom.zcci");
+    REQUIRE_FALSE(movie_record_parsed.output_dir_path.has_value());
+
+    auto qt_platform = MakeArgv("-platform", "xcb", "-c", "rom.3ds");
+    const auto qt_platform_parsed = ParseCompressionCLIOptions(qt_platform);
+    REQUIRE(qt_platform_parsed.compress_path == "rom.3ds");
+    REQUIRE_FALSE(qt_platform_parsed.output_dir_path.has_value());
+
+    auto qt_platform_between = MakeArgv("-c", "rom.3ds", "-platform", "xcb", "-o", "out");
+    const auto qt_platform_between_parsed = ParseCompressionCLIOptions(qt_platform_between);
+    REQUIRE(qt_platform_between_parsed.compress_path == "rom.3ds");
+    REQUIRE(qt_platform_between_parsed.output_dir_path == "out");
+}
+
 TEST_CASE("ParseCommand fails without a command", "[citra_cli]") {
     auto argv = MakeArgv("-f", "rom.3ds");
 
