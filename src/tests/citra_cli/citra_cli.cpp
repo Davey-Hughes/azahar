@@ -3,6 +3,8 @@
 // Refer to the LICENSE.txt file included.
 
 #include <array>
+#include <iostream>
+#include <sstream>
 #include <catch2/catch_test_macros.hpp>
 #include "citra_cli/citra_cli.h"
 
@@ -89,4 +91,17 @@ TEST_CASE("CheckForOptions leaves argv unchanged", "[citra_cli]") {
     const auto compress_before = compress;
     CheckForCLIOptions(compress);
     REQUIRE(compress == compress_before);
+}
+
+TEST_CASE("ParseCommand fails without a command", "[citra_cli]") {
+    auto argv = MakeArgv("-f", "rom.3ds");
+
+    // Capture std::cout to check that no command (e.g. compression) was run.
+    std::ostringstream output;
+    auto* const original_cout_buffer = std::cout.rdbuf(output.rdbuf());
+    const int result = CitraCLI::ParseCommand(static_cast<int>(argv.size() - 1), argv.data());
+    std::cout.rdbuf(original_cout_buffer);
+
+    REQUIRE(result != 0);
+    REQUIRE(output.str().empty());
 }

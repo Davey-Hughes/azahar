@@ -51,6 +51,7 @@ int ParseCommand(int argc, char* argv[]) {
     if (CheckForOptions(compression_ops_optstring, argc, argv)) {
         return ParseCompressionCommand(argc, argv);
     }
+    return 1;
 }
 
 } // namespace CitraCLI
