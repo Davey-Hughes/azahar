@@ -48,6 +48,17 @@ TEST_CASE("CheckForOptions stops at the end of options", "[citra_cli]") {
     REQUIRE_FALSE(CheckForCLIOptions(argv));
 }
 
+TEST_CASE("CheckForOptions ignores single-dash frontend options", "[citra_cli]") {
+    auto qt_platform = MakeArgv("-platform", "xcb", "rom.3ds");
+    REQUIRE_FALSE(CheckForCLIOptions(qt_platform));
+
+    auto qt_geometry = MakeArgv("-qwindowgeometry", "1280x720", "rom.3ds");
+    REQUIRE_FALSE(CheckForCLIOptions(qt_geometry));
+
+    auto room_name = MakeArgv("--room", "-nCoolroom");
+    REQUIRE_FALSE(CheckForCLIOptions(room_name));
+}
+
 TEST_CASE("CheckForOptions detects compression options", "[citra_cli]") {
     auto compress = MakeArgv("-c", "rom.3ds");
     REQUIRE(CheckForCLIOptions(compress));
