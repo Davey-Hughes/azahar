@@ -7,6 +7,7 @@
 #include <sstream>
 #include <catch2/catch_test_macros.hpp>
 #include "citra_cli/citra_cli.h"
+#include "citra_cli/compression_cli.h"
 
 namespace {
 
@@ -21,6 +22,11 @@ template <std::size_t N>
 bool CheckForCLIOptions(std::array<char*, N>& argv) {
     return CitraCLI::CheckForOptions(CitraCLI::cli_capture_optstring, static_cast<int>(N - 1),
                                      argv.data());
+}
+
+template <std::size_t N>
+CitraCLI::CompressionOptions ParseCompressionCLIOptions(std::array<char*, N>& argv) {
+    return CitraCLI::ParseCompressionOptions(static_cast<int>(N - 1), argv.data());
 }
 
 } // Anonymous namespace
@@ -91,6 +97,20 @@ TEST_CASE("CheckForOptions leaves argv unchanged", "[citra_cli]") {
     const auto compress_before = compress;
     CheckForCLIOptions(compress);
     REQUIRE(compress == compress_before);
+}
+
+TEST_CASE("ParseCompressionOptions reads compression options", "[citra_cli]") {
+    auto compress = MakeArgv("-c", "rom.3ds", "-o", "out");
+    const auto compress_options = ParseCompressionCLIOptions(compress);
+    REQUIRE(compress_options.compress_path == "rom.3ds");
+    REQUIRE_FALSE(compress_options.decompress_path.has_value());
+    REQUIRE(compress_options.output_dir_path == "out");
+
+    auto decompress = MakeArgv("-xrom.zcci");
+    const auto decompress_options = ParseCompressionCLIOptions(decompress);
+    REQUIRE_FALSE(decompress_options.compress_path.has_value());
+    REQUIRE(decompress_options.decompress_path == "rom.zcci");
+    REQUIRE_FALSE(decompress_options.output_dir_path.has_value());
 }
 
 TEST_CASE("ParseCommand fails without a command", "[citra_cli]") {

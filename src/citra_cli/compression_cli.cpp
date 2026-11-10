@@ -11,6 +11,7 @@
 #endif
 
 #include "citra_cli/citra_cli.h"
+#include "citra_cli/compression_cli.h"
 #include "common/common_paths.h"
 #include "common/logging/log.h"
 #include "common/zstd_compression.h"
@@ -47,30 +48,35 @@ static bool perform_z3ds_operation(bool is_compressing, const std::string& src_f
     }
 }
 
+CompressionOptions ParseCompressionOptions(int argc, char* argv[]) {
+    CompressionOptions options;
+
+    int option;
+    while ((option = getopt(argc, argv, compression_ops_optstring)) != -1) {
+        switch (option) {
+        case 'c':
+            options.compress_path = optarg;
+            break;
+        case 'x':
+            options.decompress_path = optarg;
+            break;
+        case 'o':
+            options.output_dir_path = optarg;
+            break;
+        }
+    }
+
+    optind = 1; // Reset getopt so that it can be used again
+    return options;
+}
+
 int ParseCompressionCommand(int argc, char* argv[]) {
     Common::Log::Initialize();
     Common::Log::Start();
 
     const std::string common_error_addendum = "\nCheck log for more details.";
 
-    std::optional<std::string> compress_path;   // The path of a decompressed file to be compressed
-    std::optional<std::string> decompress_path; // The path of a compressed file to be decompressed
-    std::optional<std::string> output_dir_path; // The directory which will contain processed file
-
-    int option;
-    while ((option = getopt(argc, argv, compression_ops_optstring)) != -1) {
-        switch (option) {
-        case 'c':
-            compress_path = optarg;
-            break;
-        case 'x':
-            decompress_path = optarg;
-            break;
-        case 'o':
-            output_dir_path = optarg;
-            break;
-        }
-    }
+    auto [compress_path, decompress_path, output_dir_path] = ParseCompressionOptions(argc, argv);
 
     bool is_compressing; // True if compressing, false if decompressing
     std::string source_path;
