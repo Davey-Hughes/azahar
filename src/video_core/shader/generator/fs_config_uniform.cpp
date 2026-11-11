@@ -25,6 +25,8 @@ FSConfigUniformData BuildFSConfigUniform(const FSConfig& config) {
     data.fog_flip = tex.fog_flip.Value();
     data.lighting = lighting.raw;
     data.proctex_enable = config.proctex.enable.Value();
+    data.shadow_flags = tex.shadow_texture_orthographic.Value() |
+                        (fb.shadow_rendering.Value() << 1);
 
     // bit (unit * 2) = enable_s, bit (unit * 2 + 1) = enable_t.
     data.tex_border = 0;
@@ -56,36 +58,61 @@ FSConfigUniformData BuildFSConfigUniform(const FSConfig& config) {
     return data;
 }
 
-bool UbershaderSupports(const FSConfig& config, const UserConfig& user) {
+UbershaderGap FindUbershaderGap(const FSConfig& config, const UserConfig& user) {
     using TextureType = Pica::TexturingRegs::TextureConfig::TextureType;
 
-    const auto texture0_type = config.texture.texture0_type.Value();
-    if (texture0_type == TextureType::TextureCube || texture0_type == TextureType::Shadow2D ||
-        texture0_type == TextureType::ShadowCube) {
-        return false;
+    switch (config.texture.texture0_type.Value()) {
+    case TextureType::TextureCube:
+        return UbershaderGap::CubeTexture;
+    case TextureType::ShadowCube:
+        return UbershaderGap::ShadowCubeTexture;
+    default:
+        break;
     }
     if (config.proctex.enable.Value()) {
-        return false;
-    }
-    if (config.lighting.enable.Value() && config.lighting.enable_shadow.Value()) {
-        return false;
-    }
-    if (config.framebuffer.shadow_rendering.Value()) {
-        return false;
+        return UbershaderGap::ProcTex;
     }
     if (config.framebuffer.requested_rgb_blend.RequiresMinMaxEmulation() ||
         config.framebuffer.requested_alpha_blend.RequiresMinMaxEmulation()) {
-        return false;
+        return UbershaderGap::MinMaxBlend;
     }
     // FramebufferConfig::ApplyProfile() only moves the requested op into logic_op when the shader
     // has to emulate it, so anything other than Copy means emulation.
     if (config.framebuffer.logic_op.Value() != Pica::FramebufferRegs::LogicOp::Copy) {
-        return false;
+        return UbershaderGap::LogicOp;
     }
     if (user.use_custom_normal.Value()) {
-        return false;
+        return UbershaderGap::CustomNormal;
     }
-    return true;
+    return UbershaderGap::None;
+}
+
+const char* UbershaderGapName(UbershaderGap gap) {
+    switch (gap) {
+    case UbershaderGap::None:
+        return "none";
+    case UbershaderGap::CubeTexture:
+        return "cube_texture";
+    case UbershaderGap::Shadow2DTexture:
+        return "shadow_2d_texture";
+    case UbershaderGap::ShadowCubeTexture:
+        return "shadow_cube_texture";
+    case UbershaderGap::ProcTex:
+        return "proctex";
+    case UbershaderGap::LightingShadow:
+        return "lighting_shadow";
+    case UbershaderGap::ShadowRendering:
+        return "shadow_rendering";
+    case UbershaderGap::MinMaxBlend:
+        return "min_max_blend";
+    case UbershaderGap::LogicOp:
+        return "logic_op";
+    case UbershaderGap::CustomNormal:
+        return "custom_normal";
+    case UbershaderGap::Count:
+        break;
+    }
+    return "unknown";
 }
 
 } // namespace Pica::Shader

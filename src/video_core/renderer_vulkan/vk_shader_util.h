@@ -4,7 +4,12 @@
 
 #pragma once
 
+#include <cstdlib>
 #include <span>
+#ifdef __linux__
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
 
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -27,5 +32,20 @@ vk::ShaderModule CompileSPV(std::span<const u32> code, vk::Device device);
 
 vk::ShaderModule Compile(std::string_view code, vk::ShaderStageFlagBits stage, vk::Device device,
                          std::string_view premable = "");
+
+/// PoC only: AZAHAR_WORKER_NICE=N sets the calling compile worker thread's nice value, once per
+/// thread. Common::SetCurrentThreadPriority() can't do this on Linux: it sets sched_priority under
+/// SCHED_OTHER, which the kernel ignores.
+inline void ApplyCompileWorkerNice() {
+#ifdef __linux__
+    thread_local const bool applied = [] {
+        if (const char* nice = std::getenv("AZAHAR_WORKER_NICE")) {
+            setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), std::atoi(nice));
+        }
+        return true;
+    }();
+    static_cast<void>(applied);
+#endif
+}
 
 } // namespace Vulkan

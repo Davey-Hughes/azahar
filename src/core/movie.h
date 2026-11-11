@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include <functional>
 #include <span>
 #include <boost/serialization/vector.hpp>
@@ -142,6 +143,12 @@ public:
 private:
     void CheckInputEnd();
 
+    /// Rewinds every per-type playback cursor to `byte`, treating earlier entries as read.
+    void ResetPlaybackCursors(std::size_t byte);
+    /// Copies the next recorded entry of `type` into `out`. Returns false only if the movie has
+    /// no entry of that type at all.
+    bool ReadNextEntry(u8 type, ControllerState& out);
+
     template <typename... Targs>
     void Handle(Targs&... Fargs);
 
@@ -179,6 +186,20 @@ private:
     u64 current_input = 0;
     // Total input count of the current movie being played. Not used for recording.
     u64 total_input = 0;
+
+    // Playback reads each input type through its own cursor (a byte offset into recorded_input).
+    // The pad and touch polls run on a fixed schedule from boot, but the accelerometer and
+    // gyroscope polls start when the game enables them, so a guest timing difference of a few
+    // ticks can reorder a motion poll and a pad poll. With one shared cursor, that reorder made the
+    // motion poll consume the pad entry and every later read land on the wrong entry.
+    static constexpr std::size_t num_input_types = 6;
+    std::array<std::size_t, num_input_types> type_cursor{};
+    std::array<std::array<u8, 7>, num_input_types> last_entry{};
+    std::array<bool, num_input_types> has_last_entry{};
+    std::vector<bool> entry_read;      // Per recorded entry, for the out-of-order count
+    std::size_t first_unread_entry = 0; // Where a single shared cursor would be
+    u64 out_of_order_reads = 0;
+    u64 repeated_reads = 0; // Reads past the last recorded entry of their type
 
     u64 id = 0; // ID of the current movie loaded
     u64 program_id = 0;

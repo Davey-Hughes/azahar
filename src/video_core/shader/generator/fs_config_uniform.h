@@ -30,7 +30,7 @@ struct FSConfigUniformData {
     u32 lighting;             // LightConfig.raw
     u32 proctex_enable;
     u32 tex_border;           // 3 units x (enable_s | enable_t << 1)
-    u32 pad0;
+    u32 shadow_flags;         // bit 0 = shadow_texture_orthographic, bit 1 = shadow_rendering
     // x = sources_raw, y = modifiers_raw, z = ops_raw, w = scales_raw
     alignas(16) std::array<Common::Vec4u, 6> tev;
     // 8 packed Light.raw words: light[i >> 2][i & 3]
@@ -47,8 +47,33 @@ static_assert(sizeof(FSConfigUniformData) == 240,
 /// Packs a fragment configuration into the fs_config block. Call FSConfig::ApplyProfile() first.
 [[nodiscard]] FSConfigUniformData BuildFSConfigUniform(const FSConfig& config);
 
+/// A fragment feature the ubershader does not implement. A draw that needs one must wait for its
+/// specialized shader.
+enum class UbershaderGap : u8 {
+    None,
+    CubeTexture,
+    Shadow2DTexture,
+    ShadowCubeTexture,
+    ProcTex,
+    LightingShadow,
+    ShadowRendering,
+    MinMaxBlend,
+    LogicOp,
+    CustomNormal,
+    Count,
+};
+
+/// Returns the first feature in the config that the ubershader lacks, or UbershaderGap::None.
+/// Call FSConfig::ApplyProfile() first.
+[[nodiscard]] UbershaderGap FindUbershaderGap(const FSConfig& config, const UserConfig& user);
+
+/// Short name for logs, such as "proctex".
+[[nodiscard]] const char* UbershaderGapName(UbershaderGap gap);
+
 /// Returns false when the config uses a feature the ubershader does not implement, in which case
 /// the draw must wait for its specialized shader. Call FSConfig::ApplyProfile() first.
-[[nodiscard]] bool UbershaderSupports(const FSConfig& config, const UserConfig& user);
+[[nodiscard]] inline bool UbershaderSupports(const FSConfig& config, const UserConfig& user) {
+    return FindUbershaderGap(config, user) == UbershaderGap::None;
+}
 
 } // namespace Pica::Shader

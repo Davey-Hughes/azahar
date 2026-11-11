@@ -124,6 +124,7 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseProgrammableVer
             shader.program = std::move(program);
             const vk::Device device = parent.instance.GetDevice();
             parent.shader_workers.QueueWork([device, &shader, this, spirv_id] {
+                ApplyCompileWorkerNice();
                 auto spirv = CompileGLSL(shader.program, vk::ShaderStageFlagBits::eVertex);
                 AppendVSSPIRV(vs_cache, spirv, spirv_id);
                 shader.program.clear();
@@ -158,6 +159,7 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseFragmentShader(
         LOG_NEW_OBJECT(Render_Vulkan, "New FS config {:016X}", fs_config_hash);
 
         parent.shader_workers.QueueWork([fs_config, user, this, &shader, fs_config_hash]() {
+            ApplyCompileWorkerNice();
             std::vector<u32> spirv;
             const bool use_spirv = parent.profile.vk_use_spirv_generator;
             if (use_spirv && !fs_config.UsesSpirvIncompatibleConfig()) {
@@ -213,6 +215,7 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseFixedGeometrySh
             LOG_NEW_OBJECT(Render_Vulkan, "New GS config {:016X}", gs_config_hash);
 
             parent.shader_workers.QueueWork([gs_config, this, &shader, gs_config_hash]() {
+                ApplyCompileWorkerNice();
                 ExtraFixedGSConfig extra;
                 extra.use_clip_planes = parent.profile.has_clip_planes;
                 extra.separable_shader = true;

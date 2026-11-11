@@ -68,7 +68,7 @@ layout (set = 0, binding = 6, std140) uniform fs_config {
     uint cfg_lighting;              // LightConfig.raw
     uint cfg_proctex_enable;
     uint cfg_tex_border;            // 3 units x (enable_s | enable_t << 1)
-    uint cfg_pad0;
+    uint cfg_shadow_flags;          // bit 0 = shadow_texture_orthographic, bit 1 = shadow_rendering
     uvec4 cfg_tev[NUM_TEV_STAGES];  // x=sources y=modifiers z=ops w=scales
     uvec4 cfg_light[2];             // 8 packed Light.raw words
     uvec4 cfg_lut_raw[2];           // 7 packed LutConfig.raw words (d0,d1,sp,fr,rr,rg,rb)
@@ -107,6 +107,10 @@ layout (location = 0) out vec4 color;
 
 // Texture samplers (binding 0-2), LUT texture buffers (3-5), cube view of tex0 (6).
 layout (set = 1, binding = 0) uniform sampler2D tex0;
+// For Shadow2D, RasterizerVulkan::SyncTextureUnits() binds the r32ui storage view of the shadow map
+// to binding 0. Both variables alias the same combined image sampler, and a draw reads only the one
+// that matches cfg_texture0_type.
+layout (set = 1, binding = 0) uniform usampler2D tex0_shadow;
 layout (set = 1, binding = 1) uniform sampler2D tex1;
 layout (set = 1, binding = 2) uniform sampler2D tex2;
 layout (set = 0, binding = 3) uniform samplerBuffer texture_buffer_lut_lf;
@@ -115,6 +119,10 @@ layout (set = 0, binding = 5) uniform samplerBuffer texture_buffer_lut_rgba;
 // NOTE: samplerCube tex0_cube deferred — cube/shadow texture support is a follow-up. The cube path
 // (cfg_texture0_type == 1) currently falls back to the 2D sampler so the ubershader can reuse the
 // existing texture descriptor layout (no extra cube binding/view). 2D-texture games are unaffected.
+
+// Shadow map written by shadow rendering draws. RasterizerVulkan::SyncUtilityTextures() always
+// binds something here (a null view when the draw doesn't render shadows).
+layout (set = 2, binding = 0, r32ui) uniform uimage2D shadow_buffer;
 
 // State shared between the helper
 vec4 g_rounded_primary_color;
@@ -179,6 +187,76 @@ float LookupLightingLUTSigned(int lut_index, float pos) {
     return LookupLightingLUT(lut_index, index, delta);
 }
 
+// Shadow maps. Ported from FragmentModule::DefineShadowHelpers() and FragmentModule::WriteShadow()
+// in src/video_core/shader/generator/glsl_fs_shader_gen.cpp (Vulkan paths).
+uvec2 DecodeShadow(uint pixel) {
+    return uvec2(pixel >> 8, pixel & 0xFFu);
+}
+
+uint EncodeShadow(uvec2 pixel) {
+    return (pixel.x << 8) | pixel.y;
+}
+
+uint UpdateShadow(uint pixel, uint d, uint s) {
+    uvec2 ref = DecodeShadow(pixel);
+    if (d < ref.x) {
+        if (s == 0u) {
+            ref.x = d;
+        } else {
+            s = uint(float(s) / (shadow_bias_constant + shadow_bias_linear * float(d) / float(ref.x)));
+            ref.y = min(s, ref.y);
+        }
+    }
+    return EncodeShadow(ref);
+}
+
+float CompareShadow(uint pixel, uint z) {
+    uvec2 p = DecodeShadow(pixel);
+    return mix(float(p.y) * (1.0 / 255.0), 0.0, p.x <= z);
+}
+
+float mix2(vec4 s, vec2 a) {
+    vec2 t = mix(s.xy, s.zw, a.yy);
+    return mix(t.x, t.y, a.x);
+}
+
+float SampleShadow2D(ivec2 uv, uint z) {
+    if (any(bvec4(lessThan(uv, ivec2(0)), greaterThanEqual(uv, textureSize(tex0_shadow, 0)))))
+        return 1.0;
+    return CompareShadow(texelFetch(tex0_shadow, uv, 0).x, z);
+}
+
+vec4 shadowTexture(vec2 uv, float w) {
+    if ((cfg_shadow_flags & 1u) == 0u) { // perspective
+        uv /= w;
+    }
+    uint z = uint(max(0, int(min(abs(w), 1.0) * float(0xFFFFFF)) - shadow_texture_bias));
+    vec2 coord = vec2(textureSize(tex0_shadow, 0)) * uv - vec2(0.5);
+    vec2 coord_floor = floor(coord);
+    vec2 f = coord - coord_floor;
+    ivec2 i = ivec2(coord_floor);
+    vec4 s = vec4(
+        SampleShadow2D(i              , z),
+        SampleShadow2D(i + ivec2(1, 0), z),
+        SampleShadow2D(i + ivec2(0, 1), z),
+        SampleShadow2D(i + ivec2(1, 1), z));
+    return vec4(mix2(s, f));
+}
+
+void write_shadow() {
+    uint d = uint(clamp(g_depth, 0.0, 1.0) * float(0xFFFFFF));
+    uint s = uint(g_combiner_output.g * float(0xFF));
+    ivec2 image_coord = ivec2(gl_FragCoord.xy);
+    // The generator's fallback when fragment shader interlock is missing: a compare-and-swap loop.
+    uint old = imageLoad(shadow_buffer, image_coord).x;
+    uint new1;
+    uint old2;
+    do {
+        old2 = old;
+        new1 = UpdateShadow(old, d, s);
+    } while ((old = imageAtomicCompSwap(shadow_buffer, image_coord, old, new1)) != old2);
+}
+
 // Texture units.
 vec4 sampleTexUnit0() {
     if (cfg_texture0_type == 5u) { // Disabled
@@ -201,7 +279,9 @@ vec4 sampleTexUnit0() {
     case 1u: // TextureCube (deferred — fall back to 2D sample; cube games render this face for now)
         return textureLod(tex0, texcoord0,
                           getLod(texcoord0 * vec2(textureSize(tex0, 0))) + tex_lod_bias[0]);
-    default: // Shadow2D / ShadowCube: deferred (D5 follow-up)
+    case 2u: // Shadow2D
+        return shadowTexture(texcoord0, texcoord0_w);
+    default: // ShadowCube: deferred; FindUbershaderGap() keeps these draws off the ubershader
         return vec4(1.0);
     }
 }
@@ -293,6 +373,12 @@ void do_lighting() {
     bool do_clamp_highlights = (cfg_lighting & (1u << 10)) != 0u;
     bool enable_primary_alpha = (cfg_lighting & (1u << 15)) != 0u;
     bool enable_secondary_alpha = (cfg_lighting & (1u << 16)) != 0u;
+    bool enable_shadow = (cfg_lighting & (1u << 17)) != 0u;
+    bool shadow_primary = (cfg_lighting & (1u << 18)) != 0u;
+    bool shadow_secondary = (cfg_lighting & (1u << 19)) != 0u;
+    bool shadow_invert = (cfg_lighting & (1u << 20)) != 0u;
+    bool shadow_alpha = (cfg_lighting & (1u << 21)) != 0u;
+    uint shadow_selector = bitfieldExtract(cfg_lighting, 22, 2);
 
     vec4 diffuse_sum = vec4(0.0, 0.0, 0.0, 1.0);
     vec4 specular_sum = vec4(0.0, 0.0, 0.0, 1.0);
@@ -320,6 +406,14 @@ void do_lighting() {
     g_normal = quaternion_rotate(normalized_normquat, surface_normal);
     g_tangent = quaternion_rotate(normalized_normquat, surface_tangent);
 
+    vec4 shadow = vec4(1.0);
+    if (enable_shadow) {
+        shadow = sample_tex_unit(shadow_selector);
+        if (shadow_invert) {
+            shadow = vec4(1.0) - shadow;
+        }
+    }
+
     for (uint i = 0u; i < src_num; ++i) {
         uint light = cfg_light[i >> 2][i & 3u];
         uint num = bitfieldExtract(light, 0, 3);
@@ -329,6 +423,9 @@ void do_lighting() {
         bool spot_atten_enable = (light & (1u << 6)) != 0u;
         bool geo_factor_0 = (light & (1u << 7)) != 0u;
         bool geo_factor_1 = (light & (1u << 8)) != 0u;
+        bool light_shadow = (light & (1u << 9)) != 0u;
+        vec3 shadow_diffuse = shadow_primary && light_shadow ? shadow.rgb : vec3(1.0);
+        vec3 shadow_specular = shadow_secondary && light_shadow ? shadow.rgb : vec3(1.0);
 
         vec3 lpos = light_src[num].position;
         g_light_vector = directional ? lpos : lpos + view;
@@ -406,9 +503,15 @@ void do_lighting() {
             if (enable_secondary_alpha) specular_sum.a = fr;
         }
 
-        diffuse_sum.rgb +=
-            ((light_src[num].diffuse * dot_product) + light_src[num].ambient) * dist_atten * spot_atten;
-        specular_sum.rgb += (specular_0 + specular_1) * clamp_highlights * dist_atten * spot_atten;
+        diffuse_sum.rgb += ((light_src[num].diffuse * dot_product * shadow_diffuse) +
+                            light_src[num].ambient) * dist_atten * spot_atten;
+        specular_sum.rgb +=
+            (specular_0 + specular_1) * clamp_highlights * dist_atten * spot_atten * shadow_specular;
+    }
+
+    if (shadow_alpha) {
+        if (enable_primary_alpha) diffuse_sum.a *= shadow.a;
+        if (enable_secondary_alpha) specular_sum.a *= shadow.a;
     }
 
     diffuse_sum.rgb += lighting_global_ambient;
@@ -655,6 +758,13 @@ void main() {
     }
     if (cfg_fog_mode == 7u) { // Gas: unimplemented, output a transparent pixel like upstream
         gl_FragDepth = g_depth;
+        color = vec4(0.0);
+        return;
+    }
+
+    if ((cfg_shadow_flags & 2u) != 0u) { // shadow rendering: no attachments, only shadow_buffer
+        write_shadow();
+        gl_FragDepth = gl_FragCoord.z;
         color = vec4(0.0);
         return;
     }

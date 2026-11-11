@@ -128,7 +128,10 @@ bool GraphicsPipeline::TryBuild(bool wait_built) {
     }
 
     // Fallback to (a)synchronous compilation
-    worker->QueueWork([this] { Build(); });
+    worker->QueueWork([this] {
+        ApplyCompileWorkerNice();
+        Build();
+    });
     is_pending = true;
     return wait_built;
 }

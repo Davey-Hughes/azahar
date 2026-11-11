@@ -2,13 +2,16 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <cstdlib>
 #include <optional>
+#include <string_view>
 
 #include "common/alignment.h"
 #include "common/literals.h"
 #include "common/logging/log.h"
 #include "common/math_util.h"
 #include "common/microprofile.h"
+#include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/core.h"
 #include "core/loader/loader.h"
@@ -150,8 +153,16 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
     if (use_ubershaders && !pipeline_cache.IsUbershaderAvailable()) {
         use_ubershaders = false;
     }
-    LOG_INFO(Render_Vulkan, "Ubershaders: {} (cpu vertex: {})", use_ubershaders,
-             ubershader_cpu_vertex);
+    // PoC debug switch: send every supported draw through the ubershader, even when its
+    // specialized pipeline is ready, so the ubershader's output can be compared with M0.
+    force_ubershader = use_ubershaders && std::getenv("AZAHAR_UBERSHADER_FORCE") != nullptr;
+    const char* small_draws = std::getenv("AZAHAR_UBERSHADER_SMALL_DRAWS");
+    ubershader_small_draws = !(small_draws && std::string_view{small_draws} == "0");
+    const char* worker_nice = std::getenv("AZAHAR_WORKER_NICE");
+    LOG_INFO(Render_Vulkan,
+             "Ubershaders: {} (cpu vertex: {}, forced: {}, small draws: {}, worker nice: {})",
+             use_ubershaders, ubershader_cpu_vertex, force_ubershader, ubershader_small_draws,
+             worker_nice ? worker_nice : "unset");
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
@@ -182,6 +193,34 @@ void RasterizerVulkan::LogUbershaderStats() const {
              uber_stats.frames, uber_stats.slow_frames, waits.count, waits.ns / 1'000'000,
              uber_stats.skipped, uber_stats.uber_gpu, uber_stats.uber_cpu, uber_stats.unsupported,
              pipelines.specialized, pipelines.ubershader);
+    LogDrawTimes();
+    if (uber_stats.unsupported == 0) {
+        return;
+    }
+    std::string by_gap;
+    for (std::size_t i = 1; i < uber_stats.unsupported_by_gap.size(); ++i) {
+        if (const u64 count = uber_stats.unsupported_by_gap[i]) {
+            by_gap += fmt::format(
+                " {}={}", Pica::Shader::UbershaderGapName(static_cast<Pica::Shader::UbershaderGap>(i)),
+                count);
+        }
+    }
+    LOG_INFO(Render_Vulkan, "Ubershader unsupported draws by feature:{}", by_gap);
+}
+
+void RasterizerVulkan::LogDrawTimes() const {
+    static constexpr std::array names{"specialized", "uber_gpu", "handoff", "fallback", "software"};
+    std::string line;
+    for (std::size_t path = 0; path < names.size(); ++path) {
+        for (std::size_t size = 0; size < 2; ++size) {
+            if (const u64 count = uber_stats.draw_count[path][size]) {
+                line += fmt::format(" {}{}={}/{}ms", names[path], size ? "_small" : "", count,
+                                    uber_stats.draw_ns[path][size] / 1'000'000);
+            }
+        }
+    }
+    LOG_INFO(Render_Vulkan, "Ubershader draw time (count/ms):{} cpu_vs={}ms", line,
+             uber_stats.cpu_vs_ns / 1'000'000);
 }
 
 void RasterizerVulkan::LoadDefaultDiskResources(
@@ -306,6 +345,10 @@ void RasterizerVulkan::SetupVertexArray() {
     const u32 stride_alignment = instance.GetMinVertexStrideAlignment();
 
     VertexLayout& layout = pipeline_info.state.vertex_layout;
+    // StaticPipelineInfo::OptimizedHash() hashes the whole layout, so clear bindings past the ones
+    // this draw writes. Otherwise a previous draw's leftovers (or DrawTriangles()' zeroed software
+    // layout) give the same pipeline a different key.
+    layout.bindings = {};
     layout.binding_count = 0;
     layout.attribute_count = 16;
     enable_attributes.fill(false);
@@ -526,6 +569,15 @@ bool RasterizerVulkan::AccelerateDrawBatchInternal(bool is_indexed, bool force_w
 
     const bool wait_built = force_wait || !async_shaders || regs.pipeline.num_vertices <= 6;
     if (!pipeline_cache.BindPipeline(pipeline_info, wait_built)) {
+        if (uber_stats.skipped < 40) {
+            using Pica::Shader::Generator::ProgramType;
+            LOG_INFO(Render_Vulkan,
+                     "Skipped accelerated draw: frame={} vertices={} uber_fs={} force_wait={}",
+                     uber_stats.frames, regs.pipeline.num_vertices,
+                     pipeline_info.state.shader_ids[ProgramType::FS] ==
+                         PipelineCache::UBERSHADER_FS_HASH,
+                     force_wait);
+        }
         ++uber_stats.skipped;
         return true;
     }
@@ -605,6 +657,25 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     const bool fallback_draw = !accelerate && ubershader_fallback_pending;
     ubershader_fallback_pending = false;
 
+    const auto draw_start = std::chrono::steady_clock::now();
+    if (fallback_draw) {
+        uber_stats.cpu_vs_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    draw_start - handoff_time)
+                                    .count();
+    }
+    const std::size_t draw_size = regs.pipeline.num_vertices <= 6 ? 1 : 0;
+    DrawPath draw_path = fallback_draw ? DrawPath::Fallback
+                         : accelerate  ? DrawPath::Specialized
+                                       : DrawPath::Software;
+    SCOPE_EXIT({
+        const auto path = static_cast<std::size_t>(draw_path);
+        uber_stats.draw_ns[path][draw_size] +=
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                 draw_start)
+                .count();
+        ++uber_stats.draw_count[path][draw_size];
+    });
+
     SyncDrawState();
 
     const bool shadow_rendering = regs.framebuffer.IsShadowRendering();
@@ -652,13 +723,19 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
 
     bool force_wait = false;
     std::optional<Pica::Shader::FSConfig> uber_fs_config;
-    if (accelerate && use_ubershaders && regs.pipeline.num_vertices > 6 &&
-        !pipeline_cache.IsPipelineReady(pipeline_info)) {
+    // Small draws (6 or fewer vertices) take this path too. AccelerateDrawBatchInternal() makes
+    // them wait for their pipeline because skipping one is visible (fullscreen passes, clears),
+    // but the ubershader can draw them instead.
+    if (accelerate && use_ubershaders &&
+        (ubershader_small_draws || regs.pipeline.num_vertices > 6) &&
+        (!pipeline_cache.IsPipelineReady(pipeline_info) || force_ubershader)) {
         const auto fs_config = pipeline_cache.MakeFSConfig(regs);
-        if (!Pica::Shader::UbershaderSupports(fs_config, user_config)) {
+        const auto gap = Pica::Shader::FindUbershaderGap(fs_config, user_config);
+        if (gap != Pica::Shader::UbershaderGap::None) {
             // A feature the ubershader lacks: wait for the real pipeline, as upstream does
             // without async compilation.
             ++uber_stats.unsupported;
+            ++uber_stats.unsupported_by_gap[static_cast<std::size_t>(gap)];
             force_wait = true;
         } else {
             pipeline_cache.UseUbershaderFragmentShader();
@@ -666,11 +743,14 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
                 // GPU vertex path: the game's vertex shader with the ubershader on the GPU.
                 uber_fs_config = fs_config;
                 ++uber_stats.uber_gpu;
+                draw_path = DrawPath::UberGpu;
             } else {
                 // CPU vertex path, or the GPU vertex path's pipeline isn't built yet: PICA runs
                 // the vertex shader on the CPU (PicaCore::DrawArrays() in
                 // src/video_core/pica/pica_core.cpp) and calls DrawTriangles().
                 ubershader_fallback_pending = true;
+                draw_path = DrawPath::Handoff;
+                handoff_time = std::chrono::steady_clock::now();
                 return false;
             }
         }
@@ -710,15 +790,13 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     bool succeeded = true;
     if (accelerate) {
         succeeded = AccelerateDrawBatchInternal(is_indexed, force_wait);
-    } else if (fallback_draw && !pipeline_cache.BindPipeline(pipeline_info, false)) {
-        // Even the trivial VS + ubershader pipeline isn't built yet: skip, as async
-        // compilation does today.
-        ++uber_stats.skipped;
     } else {
+        // A CPU vertex draw waits even for the trivial VS + ubershader pipeline. There are only a
+        // few of those (one per attachment and fixed-state combination), and skipping instead
+        // dropped every such draw in the frame that first needed one (324 draws in one albw frame).
+        pipeline_cache.BindPipeline(pipeline_info, true);
         if (fallback_draw) {
             ++uber_stats.uber_cpu;
-        } else {
-            pipeline_cache.BindPipeline(pipeline_info, true);
         }
 
         const u32 vertex_count = static_cast<u32>(vertex_batch.size());

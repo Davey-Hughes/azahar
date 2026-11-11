@@ -206,6 +206,8 @@ void Movie::serialize(Archive& ar, const unsigned int file_version) {
 
             play_mode = PlayMode::Playing;
             total_input = GetInputCount(recorded_input);
+            // Savestates hold one shared position, so every type resumes from it.
+            ResetPlaybackCursors(current_byte);
         } else {
             play_mode = PlayMode::Recording;
             rerecord_count++;
@@ -227,25 +229,78 @@ u64 Movie::GetTotalInputCount() const {
 }
 
 void Movie::CheckInputEnd() {
-    if (current_byte + sizeof(ControllerState) > recorded_input.size()) {
-        LOG_INFO(Movie, "Playback finished");
+    // The pad entries set the movie's length: their polls run on a fixed schedule from boot.
+    if (current_input >= total_input) {
+        const auto unread = std::count(entry_read.begin(), entry_read.end(), false);
+        LOG_INFO(Movie,
+                 "Playback finished: {} reads out of recorded order, {} past the end of their "
+                 "type, {} entries never read",
+                 out_of_order_reads, repeated_reads, unread);
         play_mode = PlayMode::MovieFinished;
         playback_completion_callback();
     }
 }
 
+void Movie::ResetPlaybackCursors(std::size_t byte) {
+    type_cursor.fill(byte);
+    has_last_entry.fill(false);
+    entry_read.assign(recorded_input.size() / sizeof(ControllerState), false);
+    first_unread_entry = std::min(byte / sizeof(ControllerState), entry_read.size());
+    std::fill_n(entry_read.begin(), first_unread_entry, true);
+    out_of_order_reads = 0;
+    repeated_reads = 0;
+}
+
+bool Movie::ReadNextEntry(u8 type, ControllerState& out) {
+    static_assert(sizeof(ControllerState) == std::tuple_size_v<decltype(last_entry)::value_type>);
+    constexpr std::size_t entry_size = sizeof(ControllerState);
+
+    std::size_t& cursor = type_cursor[type];
+    while (cursor + entry_size <= recorded_input.size()) {
+        const std::size_t pos = cursor;
+        cursor += entry_size;
+        if (recorded_input[pos] != type) {
+            continue;
+        }
+
+        std::memcpy(&out, &recorded_input[pos], entry_size);
+        std::memcpy(last_entry[type].data(), &recorded_input[pos], entry_size);
+        has_last_entry[type] = true;
+
+        const std::size_t index = pos / entry_size;
+        if (index != first_unread_entry && out_of_order_reads++ == 0) {
+            LOG_WARNING(Movie,
+                        "Input type {} read out of recorded order (entry {}, a single cursor "
+                        "would be at {})",
+                        static_cast<int>(type), index, first_unread_entry);
+        }
+        entry_read[index] = true;
+        while (first_unread_entry < entry_read.size() && entry_read[first_unread_entry]) {
+            first_unread_entry++;
+        }
+        return true;
+    }
+
+    // The game polled this type more often than it did while recording. Repeat the last recorded
+    // value rather than falling back to the host's input devices, so playback stays deterministic.
+    if (!has_last_entry[type]) {
+        return false;
+    }
+    if (repeated_reads++ == 0) {
+        LOG_WARNING(Movie, "Input type {} has no more recorded entries, repeating the last one",
+                    static_cast<int>(type));
+    }
+    std::memcpy(&out, last_entry[type].data(), entry_size);
+    return true;
+}
+
 void Movie::Play(Service::HID::PadState& pad_state, s16& circle_pad_x, s16& circle_pad_y) {
     ControllerState s{};
-    std::memcpy(&s, &recorded_input[current_byte], sizeof(ControllerState));
-    current_byte += sizeof(ControllerState);
-    current_input++;
-
-    if (s.type != ControllerStateType::PadAndCircle) {
-        LOG_ERROR(Movie,
-                  "Expected to read type {}, but found {}. Your playback will be out of sync",
-                  static_cast<int>(ControllerStateType::PadAndCircle), s.type);
+    if (!ReadNextEntry(static_cast<u8>(ControllerStateType::PadAndCircle), s)) {
         return;
     }
+    current_byte = type_cursor[static_cast<u8>(ControllerStateType::PadAndCircle)];
+    current_input++;
 
     pad_state.a.Assign(s.pad_and_circle.a);
     pad_state.b.Assign(s.pad_and_circle.b);
@@ -268,13 +323,7 @@ void Movie::Play(Service::HID::PadState& pad_state, s16& circle_pad_x, s16& circ
 
 void Movie::Play(Service::HID::TouchDataEntry& touch_data) {
     ControllerState s{};
-    std::memcpy(&s, &recorded_input[current_byte], sizeof(ControllerState));
-    current_byte += sizeof(ControllerState);
-
-    if (s.type != ControllerStateType::Touch) {
-        LOG_ERROR(Movie,
-                  "Expected to read type {}, but found {}. Your playback will be out of sync",
-                  static_cast<int>(ControllerStateType::Touch), s.type);
+    if (!ReadNextEntry(static_cast<u8>(ControllerStateType::Touch), s)) {
         return;
     }
 
@@ -285,13 +334,7 @@ void Movie::Play(Service::HID::TouchDataEntry& touch_data) {
 
 void Movie::Play(Service::HID::AccelerometerDataEntry& accelerometer_data) {
     ControllerState s{};
-    std::memcpy(&s, &recorded_input[current_byte], sizeof(ControllerState));
-    current_byte += sizeof(ControllerState);
-
-    if (s.type != ControllerStateType::Accelerometer) {
-        LOG_ERROR(Movie,
-                  "Expected to read type {}, but found {}. Your playback will be out of sync",
-                  static_cast<int>(ControllerStateType::Accelerometer), s.type);
+    if (!ReadNextEntry(static_cast<u8>(ControllerStateType::Accelerometer), s)) {
         return;
     }
 
@@ -302,13 +345,7 @@ void Movie::Play(Service::HID::AccelerometerDataEntry& accelerometer_data) {
 
 void Movie::Play(Service::HID::GyroscopeDataEntry& gyroscope_data) {
     ControllerState s{};
-    std::memcpy(&s, &recorded_input[current_byte], sizeof(ControllerState));
-    current_byte += sizeof(ControllerState);
-
-    if (s.type != ControllerStateType::Gyroscope) {
-        LOG_ERROR(Movie,
-                  "Expected to read type {}, but found {}. Your playback will be out of sync",
-                  static_cast<int>(ControllerStateType::Gyroscope), s.type);
+    if (!ReadNextEntry(static_cast<u8>(ControllerStateType::Gyroscope), s)) {
         return;
     }
 
@@ -319,13 +356,7 @@ void Movie::Play(Service::HID::GyroscopeDataEntry& gyroscope_data) {
 
 void Movie::Play(Service::IR::PadState& pad_state, s16& c_stick_x, s16& c_stick_y) {
     ControllerState s{};
-    std::memcpy(&s, &recorded_input[current_byte], sizeof(ControllerState));
-    current_byte += sizeof(ControllerState);
-
-    if (s.type != ControllerStateType::IrRst) {
-        LOG_ERROR(Movie,
-                  "Expected to read type {}, but found {}. Your playback will be out of sync",
-                  static_cast<int>(ControllerStateType::IrRst), s.type);
+    if (!ReadNextEntry(static_cast<u8>(ControllerStateType::IrRst), s)) {
         return;
     }
 
@@ -337,13 +368,7 @@ void Movie::Play(Service::IR::PadState& pad_state, s16& c_stick_x, s16& c_stick_
 
 void Movie::Play(Service::IR::ExtraHIDResponse& extra_hid_response) {
     ControllerState s{};
-    std::memcpy(&s, &recorded_input[current_byte], sizeof(ControllerState));
-    current_byte += sizeof(ControllerState);
-
-    if (s.type != ControllerStateType::ExtraHidResponse) {
-        LOG_ERROR(Movie,
-                  "Expected to read type {}, but found {}. Your playback will be out of sync",
-                  static_cast<int>(ControllerStateType::ExtraHidResponse), s.type);
+    if (!ReadNextEntry(static_cast<u8>(ControllerStateType::ExtraHidResponse), s)) {
         return;
     }
 
@@ -545,6 +570,10 @@ void Movie::StartPlayback(const std::string& movie_file) {
 
             current_byte = 0;
             current_input = 0;
+            // Count the pad entries rather than trusting the header: they decide when playback
+            // ends (Movie::CheckInputEnd()).
+            total_input = GetInputCount(recorded_input);
+            ResetPlaybackCursors(0);
             id = header.id;
             program_id = header.program_id;
 

@@ -12,6 +12,7 @@
 #include "video_core/renderer_vulkan/vk_render_manager.h"
 #include "video_core/renderer_vulkan/vk_stream_buffer.h"
 #include "video_core/renderer_vulkan/vk_texture_runtime.h"
+#include "video_core/shader/generator/fs_config_uniform.h"
 
 namespace Frontend {
 class EmuWindow;
@@ -98,6 +99,7 @@ private:
 
     /// Logs the cumulative ubershader counters
     void LogUbershaderStats() const;
+    void LogDrawTimes() const;
 
     /// Generic draw function for DrawTriangles and AccelerateDrawBatch
     bool Draw(bool accelerate, bool is_indexed);
@@ -153,6 +155,11 @@ private:
     bool async_shaders{false};
     bool use_ubershaders{false};
     bool ubershader_cpu_vertex{false};
+    // Set from the AZAHAR_UBERSHADER_FORCE environment variable (PoC only).
+    bool force_ubershader{false};
+    // Cleared by AZAHAR_UBERSHADER_SMALL_DRAWS=0 (PoC only): draws of 6 or fewer vertices then
+    // wait for their pipeline, as upstream does, instead of taking the ubershader.
+    bool ubershader_small_draws{true};
     // Set by an accelerated draw that hands itself to the CPU vertex path. Read and cleared at the
     // top of the next RasterizerVulkan::Draw(), and also cleared by an empty
     // RasterizerVulkan::DrawTriangles().
@@ -165,7 +172,18 @@ private:
         u64 uber_gpu{};
         u64 uber_cpu{};
         u64 unsupported{};
+        // unsupported, split by the first missing feature (Pica::Shader::FindUbershaderGap())
+        std::array<u64, static_cast<std::size_t>(Pica::Shader::UbershaderGap::Count)>
+            unsupported_by_gap{};
+        // PoC profiling: wall time spent in Draw(), by DrawPath and by size (index 1 = 6 or fewer
+        // vertices), plus the time PICA spends on the CPU vertex shader between a hand-off and
+        // its fallback draw.
+        std::array<std::array<u64, 2>, 5> draw_ns{};
+        std::array<std::array<u64, 2>, 5> draw_count{};
+        u64 cpu_vs_ns{};
     } uber_stats;
+    enum class DrawPath : u8 { Specialized, UberGpu, Handoff, Fallback, Software };
+    std::chrono::steady_clock::time_point handoff_time{};
     std::chrono::steady_clock::time_point last_frame_time{};
 };
 
