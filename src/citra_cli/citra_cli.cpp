@@ -20,12 +20,17 @@ bool CheckForOptions(const char* optstring, int argc, char* argv[]) {
     std::vector<char*> args(argv, argv + argc);
     args.push_back(nullptr);
 
+    // Use getopt_long_only with no long options so that frontend options such as "--fullscreen" or
+    // Qt's "-platform" are skipped as a single unknown option, rather than being parsed as the
+    // short options "-f -u -l -l -s -c". Options starting with c, x or o are still parsed as short.
+    static const struct option no_long_opts[] = {{nullptr, 0, nullptr, 0}};
+
     const int original_opterr = opterr;
     opterr = 0; // Temporarily suppress invalid option messages
 
     bool return_value = false;
     int option;
-    while ((option = getopt(argc, args.data(), optstring)) != -1) {
+    while ((option = getopt_long_only(argc, args.data(), optstring, no_long_opts, nullptr)) != -1) {
         for (size_t i = 0; optstring[i] != '\0'; ++i) {
             if (optstring[i] == ':') {
                 continue;
