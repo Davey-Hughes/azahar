@@ -108,6 +108,15 @@ static std::size_t PriorityWorkerCount() {
     return 0;
 }
 
+static bool UberFirstFront() {
+    const char* env = std::getenv("AZAHAR_UBER_FIRST");
+    const bool front = env && std::string_view{env} == "front";
+    if (front) {
+        LOG_INFO(Render_Vulkan, "Priority work (VS + ubershader pipelines): queue front (env)");
+    }
+    return front;
+}
+
 PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                              RenderManager& renderpass_cache_, DescriptorUpdateQueue& update_queue_)
     : instance{instance_}, scheduler{scheduler_}, renderpass_cache{renderpass_cache_},
@@ -115,7 +124,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
       num_worker_threads{PipelineWorkerCount()},
       pipeline_workers{num_worker_threads, "Pipeline workers"},
       shader_workers{num_worker_threads, "Shader workers"},
-      priority_workers{PriorityWorkerCount(), "Priority workers"},
+      priority_workers{PriorityWorkerCount(), "Priority workers"}, uber_first_front{UberFirstFront()},
       descriptor_heaps{
           DescriptorHeap{instance, scheduler.GetMasterSemaphore(), BUFFER_BINDINGS, 32},
           DescriptorHeap{instance, scheduler.GetMasterSemaphore(), TEXTURE_BINDINGS<1>},

@@ -165,8 +165,15 @@ public:
 private:
     friend ShaderDiskCache;
 
-    Common::ThreadWorker& VertexShaderWorkers() {
-        return priority_workers.NumWorkers() > 0 ? priority_workers : shader_workers;
+    template <typename Work>
+    void QueueVertexShaderWork(Work&& work) {
+        if (priority_workers.NumWorkers() > 0) {
+            priority_workers.QueueWork(std::forward<Work>(work));
+        } else if (uber_first_front) {
+            shader_workers.QueuePriorityWork(std::forward<Work>(work));
+        } else {
+            shader_workers.QueueWork(std::forward<Work>(work));
+        }
     }
     Common::ThreadWorker& UberPipelineWorkers() {
         return priority_workers.NumWorkers() > 0 ? priority_workers : pipeline_workers;
@@ -227,8 +234,10 @@ private:
     Common::ThreadWorker pipeline_workers;
     Common::ThreadWorker shader_workers;
     // PoC: AZAHAR_UBER_FIRST=N runs vertex shader compiles and ubershader pipeline builds on
-    // their own N workers, so they don't queue behind specialized work. 0 (default) = upstream.
+    // their own N workers, so they don't queue behind specialized work. AZAHAR_UBER_FIRST=front
+    // queues them ahead of other work on the existing workers instead. Unset = upstream.
     Common::ThreadWorker priority_workers;
+    bool uber_first_front;
     PipelineInfo current_info{};
     GraphicsPipeline* current_pipeline{};
     std::array<DescriptorHeap, NumDescriptorHeaps> descriptor_heaps;

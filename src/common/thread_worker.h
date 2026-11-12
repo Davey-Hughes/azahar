@@ -47,16 +47,18 @@ public:
                     Task task;
                     {
                         std::unique_lock lock{queue_mutex};
-                        if (requests.empty()) {
+                        if (requests.empty() && priority_requests.empty()) {
                             wait_condition.notify_all();
                         }
-                        Common::CondvarWait(condition, lock, stop_token,
-                                            [this] { return !requests.empty(); });
+                        Common::CondvarWait(condition, lock, stop_token, [this] {
+                            return !requests.empty() || !priority_requests.empty();
+                        });
                         if (stop_token.stop_requested()) {
                             break;
                         }
-                        task = std::move(requests.front());
-                        requests.pop();
+                        auto& queue = priority_requests.empty() ? requests : priority_requests;
+                        task = std::move(queue.front());
+                        queue.pop();
                     }
                     if constexpr (with_state) {
                         task(&state);
@@ -90,6 +92,16 @@ public:
         condition.notify_one();
     }
 
+    // PoC: runs before any work queued with QueueWork() (FIFO among priority work).
+    void QueuePriorityWork(Task work) {
+        {
+            std::unique_lock lock{queue_mutex};
+            priority_requests.emplace(std::move(work));
+            ++work_scheduled;
+        }
+        condition.notify_one();
+    }
+
     void WaitForRequests(std::stop_token stop_token = {}) {
         std::stop_callback callback(stop_token, [this] {
             for (auto& thread : threads) {
@@ -108,6 +120,7 @@ public:
 
 private:
     std::queue<Task> requests;
+    std::queue<Task> priority_requests;
     std::mutex queue_mutex;
     std::condition_variable_any condition;
     std::condition_variable wait_condition;

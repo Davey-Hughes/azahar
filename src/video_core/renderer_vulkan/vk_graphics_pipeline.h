@@ -330,6 +330,11 @@ public:
 
     bool Build(bool fail_on_compile_required = false);
 
+    // PoC: queue this pipeline's build ahead of other work on its worker.
+    void SetPriority(bool priority_) noexcept {
+        priority = priority_;
+    }
+
     [[nodiscard]] vk::Pipeline Handle() const noexcept {
         return *pipeline;
     }
@@ -346,6 +351,7 @@ private:
     PipelineInfo info;
     std::array<Shader*, 3> stages;
     bool is_pending{};
+    bool priority{};
 };
 
 } // namespace Vulkan
