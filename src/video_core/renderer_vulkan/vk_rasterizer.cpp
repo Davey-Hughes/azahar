@@ -284,6 +284,10 @@ void RasterizerVulkan::LogDrawTimes() const {
     }
     LOG_INFO(Render_Vulkan, "Ubershader draw time (count/ms):{} cpu_vs={}ms", line,
              uber_stats.cpu_vs_ns / 1'000'000);
+    const auto& hw = uber_stats.handoff_wait;
+    LOG_INFO(Render_Vulkan,
+             "PoC hand-off waits: vs_pending={} fs_pending={} gs_pending={} queued={} building={}",
+             hw[0], hw[1], hw[2], hw[3], hw[4]);
     if (gpu_draw_timer.IsEnabled()) {
         static constexpr std::array<const char*, GpuDrawTimer::NumCategories> gpu_names{
             "specialized", "specialized_small", "uber_gpu", "uber_gpu_small", "handoff",
@@ -830,6 +834,12 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
                 // CPU vertex path, or the GPU vertex path's pipeline isn't built yet: PICA runs
                 // the vertex shader on the CPU (PicaCore::DrawArrays() in
                 // src/video_core/pica/pica_core.cpp) and calls DrawTriangles().
+                if (!ubershader_cpu_vertex) {
+                    if (GraphicsPipeline* const waiting = pipeline_cache.LastReadyCheck()) {
+                        ++uber_stats.handoff_wait[static_cast<std::size_t>(
+                            waiting->PocNoteHandoff())];
+                    }
+                }
                 ubershader_fallback_pending = true;
                 draw_path = DrawPath::Handoff;
                 handoff_time = std::chrono::steady_clock::now();

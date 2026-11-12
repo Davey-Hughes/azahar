@@ -123,13 +123,21 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseProgrammableVer
 
             shader.program = std::move(program);
             const vk::Device device = parent.instance.GetDevice();
-            parent.QueueVertexShaderWork([device, &shader, this, spirv_id] {
+            const auto poc_queued = std::chrono::steady_clock::now();
+            parent.QueueVertexShaderWork([device, &shader, this, spirv_id, poc_queued] {
                 ApplyCompileWorkerNice();
+                using Ms = std::chrono::duration<double, std::milli>;
+                const auto start = std::chrono::steady_clock::now();
                 auto spirv = CompileGLSL(shader.program, vk::ShaderStageFlagBits::eVertex);
+                const auto glsl_done = std::chrono::steady_clock::now();
                 AppendVSSPIRV(vs_cache, spirv, spirv_id);
                 shader.program.clear();
                 shader.module = CompileSPV(spirv, device);
                 shader.MarkDone();
+                LOG_INFO(Render_Vulkan,
+                         "PoC VS compiled: queued_ms={:.0f} glsl_ms={:.1f} module_ms={:.1f}",
+                         Ms(start - poc_queued).count(), Ms(glsl_done - start).count(),
+                         Ms(std::chrono::steady_clock::now() - glsl_done).count());
             });
         }
 
@@ -265,6 +273,7 @@ GraphicsPipeline* ShaderDiskCache::GetPipeline(const PipelineInfo& info) {
             *parent.pipeline_layout, parent.current_shaders,
             uber_fs ? &parent.UberPipelineWorkers() : &parent.pipeline_workers);
         it.value()->SetPriority(uber_fs && parent.uber_first_front);
+        it.value()->SetPocUber(uber_fs);
     }
 
     // Ubershader pipelines are transient stand-ins; their FS hash is not a cached shader, so an

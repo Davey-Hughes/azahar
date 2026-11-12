@@ -404,12 +404,14 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT,
         vk::PhysicalDevicePipelineCreationCacheControlFeaturesEXT,
         vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR,
-        vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT>();
+        vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT,
+        vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>();
     const vk::StructureChain properties_chain =
         physical_device
             .getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceDriverProperties,
                             vk::PhysicalDevicePortabilitySubsetPropertiesKHR,
-                            vk::PhysicalDeviceExternalMemoryHostPropertiesEXT>();
+                            vk::PhysicalDeviceExternalMemoryHostPropertiesEXT,
+                            vk::PhysicalDeviceGraphicsPipelineLibraryPropertiesEXT>();
     const vk::PhysicalDeviceDriverProperties driver =
         properties_chain.get<vk::PhysicalDeviceDriverProperties>();
 
@@ -422,7 +424,7 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    boost::container::static_vector<const char*, 16> enabled_extensions;
+    boost::container::static_vector<const char*, 24> enabled_extensions;
     const auto add_extension = [&](std::string_view extension, bool blacklist = false,
                                    std::string_view reason = "") -> bool {
         const auto result =
@@ -485,6 +487,13 @@ bool Instance::CreateDevice() {
     const bool has_extended_dynamic_state3 =
         Settings::values.use_ubershaders.GetValue() &&
         add_extension(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
+    // PoC: only with AZAHAR_UBER_GPL=1, so one binary can compare both ways of building.
+    const char* const poc_gpl_env = std::getenv("AZAHAR_UBER_GPL");
+    const bool want_poc_gpl = Settings::values.use_ubershaders.GetValue() && poc_gpl_env &&
+                              std::string_view{poc_gpl_env} == "1";
+    const bool has_graphics_pipeline_library =
+        want_poc_gpl && add_extension(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+        add_extension(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
 
     const auto family_properties = physical_device.getQueueFamilyProperties();
     if (family_properties.empty()) {
@@ -547,6 +556,7 @@ bool Instance::CreateDevice() {
         vk::PhysicalDevicePipelineCreationCacheControlFeaturesEXT{},
         vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR{},
         vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT{},
+        vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT{},
     };
 
 #define PROP_GET(structName, prop, property) property = properties_chain.get<structName>().prop;
@@ -616,6 +626,31 @@ bool Instance::CreateDevice() {
     } else {
         device_chain.unlink<vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT>();
         LOG_INFO(Render_Vulkan, "EDS3 dynamic blend unavailable or disabled");
+    }
+
+    const auto& gpl_properties =
+        properties_chain.get<vk::PhysicalDeviceGraphicsPipelineLibraryPropertiesEXT>();
+    if (has_graphics_pipeline_library &&
+        feature_chain.get<vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>()
+            .graphicsPipelineLibrary &&
+        gpl_properties.graphicsPipelineLibraryFastLinking && extended_dynamic_state &&
+        extended_dynamic_state3) {
+        poc_uber_gpl = true;
+        device_chain.get<vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>()
+            .graphicsPipelineLibrary = true;
+        LOG_INFO(Render_Vulkan,
+                 "PoC GPL ubershader pipelines enabled (independent interpolation: {})",
+                 gpl_properties.graphicsPipelineLibraryIndependentInterpolationDecoration);
+    } else {
+        device_chain.unlink<vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>();
+        if (want_poc_gpl) {
+            LOG_WARNING(Render_Vulkan,
+                        "PoC GPL ubershader pipelines unavailable (extension {}, fast linking "
+                        "{}, EDS {}, EDS3 {})",
+                        has_graphics_pipeline_library,
+                        gpl_properties.graphicsPipelineLibraryFastLinking,
+                        extended_dynamic_state, extended_dynamic_state3);
+        }
     }
 
     if (has_custom_border_color) {

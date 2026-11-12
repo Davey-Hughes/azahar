@@ -95,6 +95,11 @@ public:
     /// like an async BindPipeline() but records nothing.
     bool IsPipelineReady(PipelineInfo& info);
 
+    // PoC: the pipeline the last IsPipelineReady() call looked up.
+    [[nodiscard]] GraphicsPipeline* LastReadyCheck() const noexcept {
+        return last_ready_check;
+    }
+
     /// Builds the fragment config for @p regs with this device's profile applied
     Pica::Shader::FSConfig MakeFSConfig(const Pica::RegsInternal& regs) const;
 
@@ -240,6 +245,7 @@ private:
     bool uber_first_front;
     PipelineInfo current_info{};
     GraphicsPipeline* current_pipeline{};
+    GraphicsPipeline* last_ready_check{};
     std::array<DescriptorHeap, NumDescriptorHeaps> descriptor_heaps;
     std::array<vk::DescriptorSet, NumRasterizerSets> bound_descriptor_sets{};
     std::array<u32, NumDynamicOffsets> offsets{};

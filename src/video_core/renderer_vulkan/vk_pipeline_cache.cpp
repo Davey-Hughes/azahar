@@ -708,6 +708,7 @@ bool PipelineCache::IsPipelineReady(PipelineInfo& info) {
     GraphicsPipeline* const pipeline = curr_disk_cache->GetPipeline(info);
     current_shaders[ProgramType::GS] = geometry_shader;
     shader_hashes[ProgramType::GS] = geometry_hash;
+    last_ready_check = pipeline;
     return pipeline->IsDone() || pipeline->TryBuild(false);
 }
 

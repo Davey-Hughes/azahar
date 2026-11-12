@@ -178,6 +178,12 @@ public:
         return pipeline_creation_cache_control;
     }
 
+    /// PoC (AZAHAR_UBER_GPL=1): build ubershader pipelines from a shared fragment library and a
+    /// per-pipeline vertex library with VK_EXT_graphics_pipeline_library fast linking.
+    bool IsPocUberGplEnabled() const {
+        return poc_uber_gpl;
+    }
+
     /// Returns true when VK_EXT_shader_stencil_export is supported
     bool IsShaderStencilExportSupported() const {
         return shader_stencil_export;
@@ -354,6 +360,7 @@ protected:
     bool create_renderpass2{};
     bool depth_stencil_resolve{};
     bool pipeline_creation_cache_control{};
+    bool poc_uber_gpl{};
     bool fragment_shader_barycentric{};
     bool shader_stencil_export{};
     bool external_memory_host{};

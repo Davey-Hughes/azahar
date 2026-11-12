@@ -2,6 +2,9 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <memory>
+#include <unordered_map>
+
 #include <boost/container/static_vector.hpp>
 
 #include "common/alignment.h"
@@ -123,14 +126,23 @@ bool GraphicsPipeline::TryBuild(bool wait_built) {
     }
 
     // Ask the driver if it can give us the pipeline quickly.
-    if (!shaders_pending && instance.IsPipelineCreationCacheControlSupported() && Build(true)) {
-        return true;
+    if (!shaders_pending && instance.IsPipelineCreationCacheControlSupported()) {
+        const auto start = PocClock::now();
+        if (Build(true)) {
+            poc_queued = start;
+            PocLogBuild(start, PocClock::now(), true);
+            return true;
+        }
     }
 
     // Fallback to (a)synchronous compilation
+    poc_queued = PocClock::now();
     auto build = [this] {
         ApplyCompileWorkerNice();
+        const auto start = PocClock::now();
+        poc_started.store(true, std::memory_order_relaxed);
         Build();
+        PocLogBuild(start, PocClock::now(), false);
     };
     if (priority) {
         worker->QueuePriorityWork(std::move(build));
@@ -308,6 +320,147 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         };
     }
 
+    const vk::RenderPass render_pass =
+        renderpass_cache.GetRenderpass(info.state.attachments.color, info.state.attachments.depth,
+                                       false, info.state.attachments.sample_count);
+
+    if (poc_uber && instance.IsPocUberGplEnabled()) {
+        // PoC: the ubershader FS is the expensive part and the same for every ubershader
+        // pipeline, so build it once per fragment state as a library and fast-link it with a
+        // per-pipeline vertex library. The vertex library still compiles the game's VS.
+        // The fail_on_compile_required (emu thread) attempt succeeds only when the fragment
+        // library exists and the driver has the vertex library cached, as without GPL.
+        using Ms = std::chrono::duration<double, std::milli>;
+        const vk::Device device = instance.GetDevice();
+        const auto t0 = PocClock::now();
+
+        // Everything the fragment library bakes in. Depth/stencil, blend equations and the
+        // color write mask are dynamic (IsPocUberGplEnabled() requires EDS and EDS3).
+        const u64 fragment_key = Common::HashCombine(
+            reinterpret_cast<u64>(static_cast<VkShaderModule>(stages[1]->Handle())),
+            Common::ComputeStructHash64(info.state.attachments),
+            static_cast<u64>(blending.blend_enable), static_cast<u64>(blending.logic_op));
+        PocFragmentLibrary& fragment = PocGetFragmentLibrary(fragment_key);
+        {
+            // On the emu-thread attempt, don't wait for another thread's fragment build, and
+            // only take a fragment library the driver can return without compiling.
+            std::unique_lock lock{fragment.mutex, std::defer_lock};
+            if (fail_on_compile_required) {
+                if (!lock.try_lock()) {
+                    return false;
+                }
+            } else {
+                lock.lock();
+            }
+            if (!fragment.pipeline) {
+                const auto f0 = PocClock::now();
+                const vk::GraphicsPipelineLibraryCreateInfoEXT library_info = {
+                    .flags = vk::GraphicsPipelineLibraryFlagBitsEXT::eFragmentShader |
+                             vk::GraphicsPipelineLibraryFlagBitsEXT::eFragmentOutputInterface,
+                };
+                const vk::PipelineShaderStageCreateInfo fs_stage = {
+                    .stage = vk::ShaderStageFlagBits::eFragment,
+                    .module = stages[1]->Handle(),
+                    .pName = "main",
+                };
+                // Depth-only render passes have no color attachment to describe.
+                vk::PipelineColorBlendStateCreateInfo fragment_blending = color_blending;
+                if (info.state.attachments.color == VideoCore::PixelFormat::Invalid) {
+                    fragment_blending.attachmentCount = 0;
+                }
+                vk::GraphicsPipelineCreateInfo fragment_info = {
+                    .pNext = &library_info,
+                    .flags = vk::PipelineCreateFlagBits::eLibraryKHR,
+                    .stageCount = 1,
+                    .pStages = &fs_stage,
+                    .pMultisampleState = &multisampling,
+                    .pDepthStencilState = &depth_info,
+                    .pColorBlendState = &fragment_blending,
+                    .pDynamicState = &dynamic_info,
+                    .layout = pipeline_layout,
+                    .renderPass = render_pass,
+                };
+                if (fail_on_compile_required) {
+                    fragment_info.flags |=
+                        vk::PipelineCreateFlagBits::eFailOnPipelineCompileRequiredEXT;
+                }
+                auto result = device.createGraphicsPipeline(pipeline_cache, fragment_info);
+                if (result.result == vk::Result::eErrorPipelineCompileRequiredEXT) {
+                    return false;
+                }
+                ASSERT_MSG(result.result == vk::Result::eSuccess,
+                           "PoC GPL fragment library creation failed");
+                // Never destroyed: shared by every ubershader pipeline for the device's life.
+                fragment.pipeline = result.value;
+                LOG_INFO(Render_Vulkan,
+                         "PoC GPL fragment library: key={:016x} color={} depth={} samples={} "
+                         "blend={} logic_op={} ms={:.1f}",
+                         fragment_key, static_cast<u32>(info.state.attachments.color),
+                         static_cast<u32>(info.state.attachments.depth),
+                         info.state.attachments.sample_count, blending.blend_enable,
+                         static_cast<u32>(blending.logic_op),
+                         Ms(PocClock::now() - f0).count());
+            }
+        }
+        const auto t1 = PocClock::now();
+
+        std::array<vk::PipelineShaderStageCreateInfo, MAX_SHADER_STAGES> vertex_stages;
+        u32 vertex_stage_count = 0;
+        for (const std::size_t i : {std::size_t{0}, std::size_t{2}}) {
+            if (stages[i]) {
+                vertex_stages[vertex_stage_count++] = vk::PipelineShaderStageCreateInfo{
+                    .stage = MakeShaderStage(i),
+                    .module = stages[i]->Handle(),
+                    .pName = "main",
+                };
+            }
+        }
+        const vk::GraphicsPipelineLibraryCreateInfoEXT vertex_library_info = {
+            .flags = vk::GraphicsPipelineLibraryFlagBitsEXT::eVertexInputInterface |
+                     vk::GraphicsPipelineLibraryFlagBitsEXT::ePreRasterizationShaders,
+        };
+        vk::GraphicsPipelineCreateInfo vertex_info = {
+            .pNext = &vertex_library_info,
+            .flags = vk::PipelineCreateFlagBits::eLibraryKHR,
+            .stageCount = vertex_stage_count,
+            .pStages = vertex_stages.data(),
+            .pVertexInputState = &vertex_input_info,
+            .pInputAssemblyState = &input_assembly,
+            .pViewportState = &viewport_info,
+            .pRasterizationState = &raster_state,
+            .pDynamicState = &dynamic_info,
+            .layout = pipeline_layout,
+            .renderPass = render_pass,
+        };
+        if (fail_on_compile_required) {
+            vertex_info.flags |= vk::PipelineCreateFlagBits::eFailOnPipelineCompileRequiredEXT;
+        }
+        auto vertex_result = device.createGraphicsPipelineUnique(pipeline_cache, vertex_info);
+        if (vertex_result.result == vk::Result::eErrorPipelineCompileRequiredEXT) {
+            return false;
+        }
+        ASSERT_MSG(vertex_result.result == vk::Result::eSuccess,
+                   "PoC GPL vertex library creation failed");
+        poc_vertex_library = std::move(vertex_result.value);
+        const auto t2 = PocClock::now();
+
+        const std::array libraries{*poc_vertex_library, fragment.pipeline};
+        const vk::PipelineLibraryCreateInfoKHR link_info = {
+            .libraryCount = static_cast<u32>(libraries.size()),
+            .pLibraries = libraries.data(),
+        };
+        const vk::GraphicsPipelineCreateInfo linked_info = {
+            .pNext = &link_info,
+            .layout = pipeline_layout,
+        };
+        auto linked = device.createGraphicsPipelineUnique(pipeline_cache, linked_info);
+        ASSERT_MSG(linked.result == vk::Result::eSuccess, "PoC GPL link failed");
+        pipeline = std::move(linked.value);
+        poc_gpl_ms = {Ms(t1 - t0).count(), Ms(t2 - t1).count(), Ms(PocClock::now() - t2).count()};
+        MarkDone();
+        return true;
+    }
+
     vk::GraphicsPipelineCreateInfo pipeline_info = {
         .stageCount = shader_count,
         .pStages = shader_stages.data(),
@@ -320,9 +473,7 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         .pColorBlendState = &color_blending,
         .pDynamicState = &dynamic_info,
         .layout = pipeline_layout,
-        .renderPass = renderpass_cache.GetRenderpass(info.state.attachments.color,
-                                                     info.state.attachments.depth, false,
-                                                     info.state.attachments.sample_count),
+        .renderPass = render_pass,
     };
 
     if (fail_on_compile_required) {
@@ -340,6 +491,53 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
 
     MarkDone();
     return true;
+}
+
+GraphicsPipeline::PocWaitState GraphicsPipeline::PocNoteHandoff() noexcept {
+    poc_handoffs.fetch_add(1, std::memory_order_relaxed);
+    if (is_pending) {
+        return poc_started.load(std::memory_order_relaxed) ? PocWaitState::Building
+                                                           : PocWaitState::Queued;
+    }
+    // stages[] is indexed by Pica::Shader::Generator::ProgramType: VS, FS, GS.
+    static constexpr std::array pending_state{PocWaitState::VsPending, PocWaitState::FsPending,
+                                              PocWaitState::GsPending};
+    for (std::size_t i = 0; i < stages.size(); ++i) {
+        if (stages[i] && !stages[i]->IsDone()) {
+            return pending_state[i];
+        }
+    }
+    return PocWaitState::Queued;
+}
+
+GraphicsPipeline::PocFragmentLibrary& GraphicsPipeline::PocGetFragmentLibrary(u64 key) {
+    // Leaked on purpose (PoC): the libraries live as long as the process.
+    static std::mutex map_mutex;
+    static std::unordered_map<u64, std::unique_ptr<PocFragmentLibrary>> libraries;
+    std::scoped_lock lock{map_mutex};
+    auto& entry = libraries[key];
+    if (!entry) {
+        entry = std::make_unique<PocFragmentLibrary>();
+    }
+    return *entry;
+}
+
+void GraphicsPipeline::PocLogBuild(PocClock::time_point start, PocClock::time_point end,
+                                   bool fast) const {
+    using Ms = std::chrono::duration<double, std::milli>;
+    const auto& state = info.state;
+    LOG_INFO(Render_Vulkan,
+             "PoC pipeline built: uber={} fast={} vs={:016x} wait_shaders_ms={:.0f} "
+             "queued_ms={:.0f} build_ms={:.1f} handoffs={} gpl_frag_ms={:.0f} gpl_vert_ms={:.1f} "
+             "gpl_link_ms={:.1f} layout={:016x} color={} depth={} samples={} blend={} "
+             "logic_op={} gs={:016x}",
+             poc_uber, fast, state.shader_ids[0], Ms(poc_queued - poc_created).count(),
+             Ms(start - poc_queued).count(), Ms(end - start).count(),
+             poc_handoffs.load(std::memory_order_relaxed), poc_gpl_ms[0], poc_gpl_ms[1],
+             poc_gpl_ms[2], Common::ComputeStructHash64(state.vertex_layout),
+             static_cast<u32>(state.attachments.color), static_cast<u32>(state.attachments.depth),
+             state.attachments.sample_count, state.blending.blend_enable,
+             static_cast<u32>(state.blending.logic_op), state.shader_ids[2]);
 }
 
 } // namespace Vulkan

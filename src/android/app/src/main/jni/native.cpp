@@ -257,7 +257,7 @@ static void ImportPocTogglesFromProperties() {
         "AZAHAR_PIPELINE_WORKERS",       "AZAHAR_UBER_FIRST",
         "AZAHAR_SLOW_FRAME_MS",          "AZAHAR_UBERSHADER_FORCE",
         "AZAHAR_UBERSHADER_SMALL_DRAWS", "AZAHAR_GPU_DRAW_TIMING",
-        "AZAHAR_OLD_FILL_GUARD",
+        "AZAHAR_OLD_FILL_GUARD",         "AZAHAR_UBER_GPL",
     };
     for (const char* name : names) {
         const std::string prop = "debug." + Common::ToLower(name);

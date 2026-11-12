@@ -4,6 +4,10 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
+#include <mutex>
+
 #include "common/hash.h"
 #include "common/thread_worker.h"
 #include "video_core/pica/regs_pipeline.h"
@@ -335,11 +339,39 @@ public:
         priority = priority_;
     }
 
+    // PoC: build timing log. Marks ubershader pipelines in the "PoC pipeline built" line.
+    void SetPocUber(bool uber) noexcept {
+        poc_uber = uber;
+    }
+
+    // PoC: what a draw that handed off to the CPU vertex path was waiting for.
+    enum class PocWaitState : u8 { VsPending, FsPending, GsPending, Queued, Building, Count };
+    PocWaitState PocNoteHandoff() noexcept;
+
     [[nodiscard]] vk::Pipeline Handle() const noexcept {
         return *pipeline;
     }
 
 private:
+    using PocClock = std::chrono::steady_clock;
+    void PocLogBuild(PocClock::time_point start, PocClock::time_point end, bool fast) const;
+
+    // PoC GPL: one fragment library per fragment state, shared across pipelines and threads.
+    struct PocFragmentLibrary {
+        std::mutex mutex;
+        vk::Pipeline pipeline{};
+    };
+    static PocFragmentLibrary& PocGetFragmentLibrary(u64 key);
+    vk::UniquePipeline poc_vertex_library;
+    // Fragment library (get or build), vertex library, link; ms. Zero when not built with GPL.
+    std::array<double, 3> poc_gpl_ms{};
+
+    PocClock::time_point poc_created{PocClock::now()};
+    PocClock::time_point poc_queued{};
+    std::atomic<bool> poc_started{};
+    std::atomic<u32> poc_handoffs{};
+    bool poc_uber{};
+
     const Instance& instance;
     RenderManager& renderpass_cache;
     Common::ThreadWorker* worker;

@@ -182,6 +182,10 @@ private:
         std::array<std::array<u64, 2>, 5> draw_ns{};
         std::array<std::array<u64, 2>, 5> draw_count{};
         u64 cpu_vs_ns{};
+        // PoC: hand-offs by what the GPU-VS ubershader pipeline was waiting for
+        // (GraphicsPipeline::PocWaitState).
+        std::array<u64, static_cast<std::size_t>(GraphicsPipeline::PocWaitState::Count)>
+            handoff_wait{};
     } uber_stats;
     enum class DrawPath : u8 { Specialized, UberGpu, Handoff, Fallback, Software };
     std::chrono::steady_clock::time_point handoff_time{};
