@@ -4,7 +4,16 @@
 
 #pragma once
 
+#include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <map>
+#include <mutex>
+#include <set>
+#include <string>
+#include <string_view>
 #include <type_traits>
+#include <vector>
 #include <boost/container/small_vector.hpp>
 #include <boost/range/iterator_range.hpp>
 #include "common/alignment.h"
@@ -31,6 +40,86 @@ MICROPROFILE_DECLARE(RasterizerCache_Invalidation);
 constexpr auto RangeFromInterval(const auto& map, const auto& interval) {
     return boost::make_iterator_range(map.equal_range(interval));
 }
+
+/// PoC only: tallies surface downloads (GPU to guest memory readbacks) by why they happened and
+/// which surface they read, with the time each spent, and logs a summary every 10 s.
+namespace PocDownloadLog {
+struct Entry {
+    u64 count = 0;
+    u64 bytes = 0;
+    u64 ns = 0;
+};
+inline std::mutex mutex;
+inline std::map<std::string, Entry> entries;
+inline std::chrono::steady_clock::time_point window_start = std::chrono::steady_clock::now();
+/// What the current FlushRegion() is for; empty means a caller other than ValidateSurface().
+inline thread_local std::string reason;
+/// Which Accelerate* step is running and with what config; empty outside of them.
+inline thread_local std::string caller;
+/// Full description of the surface being validated, for the first-seen detail log.
+inline thread_local std::string validate_detail;
+inline std::set<std::string> seen_details;
+
+/// Logs the full context of a download the first time that exact context is seen.
+inline void LogDetailOnce(const std::string& detail) {
+    std::scoped_lock lock{mutex};
+    if (seen_details.size() >= 64 || !seen_details.insert(detail).second) {
+        return;
+    }
+    LOG_INFO(Render, "Download detail #{}: {}", seen_details.size(), detail);
+}
+
+/// True during a short window (AZAHAR_TRACE_AT seconds after the first call, 150 ms long).
+inline bool TraceActive() {
+    static const auto start = std::chrono::steady_clock::now();
+    static const double at = [] {
+        const char* env = std::getenv("AZAHAR_TRACE_AT");
+        return env ? std::atof(env) : -1.0;
+    }();
+    if (at < 0) {
+        return false;
+    }
+    const double t =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    return t >= at && t < at + 0.15;
+}
+inline bool TraceOverlaps(PAddr addr, u32 size) {
+    return addr < 0x180BA000 && addr + size > 0x18000000;
+}
+
+inline std::string Describe(const auto& s) {
+    return fmt::format("[{:#x}-{:#x} {} {}x{} stride {} {} type {} scale {}]", s.addr, s.end,
+                       PixelFormatAsString(s.pixel_format), s.width, s.height, s.stride,
+                       s.is_tiled ? "tiled" : "linear", static_cast<u32>(s.type), s.res_scale);
+}
+
+inline void Record(std::string key, u64 bytes, u64 ns) {
+    std::scoped_lock lock{mutex};
+    Entry& entry = entries[std::move(key)];
+    ++entry.count;
+    entry.bytes += bytes;
+    entry.ns += ns;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window_start < std::chrono::seconds{10}) {
+        return;
+    }
+    std::vector<std::pair<std::string, Entry>> sorted(entries.begin(), entries.end());
+    std::ranges::sort(sorted, [](const auto& a, const auto& b) { return a.second.ns > b.second.ns; });
+    u64 total_count = 0, total_ns = 0;
+    for (const auto& [k, e] : sorted) {
+        total_count += e.count;
+        total_ns += e.ns;
+    }
+    LOG_INFO(Render, "Download log (10 s): {} downloads, {:.1f} ms", total_count, total_ns / 1e6);
+    for (std::size_t i = 0; i < std::min<std::size_t>(sorted.size(), 8); ++i) {
+        const auto& [k, e] = sorted[i];
+        LOG_INFO(Render, "Download log:   {} x{} {:.1f} ms {} KiB", k, e.count, e.ns / 1e6,
+                 e.bytes / 1024);
+    }
+    entries.clear();
+    window_start = now;
+}
+} // namespace PocDownloadLog
 
 template <class T>
 RasterizerCache<T>::RasterizerCache(Memory::MemorySystem& memory_,
@@ -229,7 +318,17 @@ bool RasterizerCache<T>::AccelerateTextureCopy(const Pica::DisplayTransferConfig
     src_params.size = ((src_params.height - 1) * src_params.stride) + src_params.width;
     src_params.end = src_params.addr + src_params.size;
 
+    const std::string poc_config = fmt::format(
+        "texcopy in {:#x} out {:#x} size {} in_w {} in_gap {} out_w {} out_gap {}",
+        config.GetPhysicalInputAddress(), config.GetPhysicalOutputAddress(), copy_size,
+        input_width, input_gap, config.texture_copy.output_width * 16,
+        config.texture_copy.output_gap * 16);
+    if (PocDownloadLog::TraceActive()) {
+        LOG_INFO(Render, "Trace: {}", poc_config);
+    }
+    PocDownloadLog::caller = "src " + poc_config;
     const auto [src_surface_id, src_rect] = GetTexCopySurface(src_params);
+    PocDownloadLog::caller.clear();
     if (!src_surface_id) {
         return false;
     }
@@ -253,8 +352,13 @@ bool RasterizerCache<T>::AccelerateTextureCopy(const Pica::DisplayTransferConfig
 
     // Since we are going to invalidate the gap if there is one, we will have to load it first
     const bool load_gap = output_gap != 0;
+    PocDownloadLog::caller =
+        fmt::format("dst {} src_surface {} src_rect {}x{} dst_params {}", poc_config,
+                    PocDownloadLog::Describe(slot_surfaces[src_surface_id]),
+                    src_rect.GetWidth(), src_rect.GetHeight(), PocDownloadLog::Describe(dst_params));
     const auto [dst_surface_id, dst_rect] =
         GetSurfaceSubRect(dst_params, ScaleMatch::Upscale, load_gap);
+    PocDownloadLog::caller.clear();
     if (!dst_surface_id) {
         return false;
     }
@@ -320,7 +424,17 @@ bool RasterizerCache<T>::AccelerateDisplayTransfer(const Pica::DisplayTransferCo
                            Pica::BytesPerPixel(config.output_format);
     }
 
+    if (PocDownloadLog::TraceActive()) {
+        LOG_INFO(Render, "Trace: displaytransfer {} in_fmt {} out_fmt {} in_linear {} "
+                         "dont_swizzle {} flip {} in_h {} out_h {}",
+                 config.DebugName(), static_cast<u32>(config.input_format.Value()),
+                 static_cast<u32>(config.output_format.Value()), config.input_linear.Value(),
+                 config.dont_swizzle.Value(), config.flip_vertically.Value(),
+                 config.input_height.Value(), config.output_height.Value());
+    }
+    PocDownloadLog::caller = fmt::format("displaytransfer src {}", config.DebugName());
     auto [src_surface_id, src_rect] = GetSurfaceSubRect(src_params, ScaleMatch::Ignore, true);
+    PocDownloadLog::caller.clear();
     if (!src_surface_id) {
         return false;
     }
@@ -365,6 +479,12 @@ bool RasterizerCache<T>::AccelerateFill(const Pica::MemoryFillConfig& config) {
     const DebugScope scope{runtime, Common::Vec4f{1.f, 0.f, 1.f, 1.f},
                            "RasterizerCache::AccelerateFill ({})", config.DebugName()};
 
+    if (PocDownloadLog::TraceActive() &&
+        PocDownloadLog::TraceOverlaps(config.GetStartAddress(),
+                                      config.GetEndAddress() - config.GetStartAddress())) {
+        LOG_INFO(Render, "Trace: fill {:#x}-{:#x}", config.GetStartAddress(),
+                 config.GetEndAddress());
+    }
     SurfaceParams params;
     params.addr = config.GetStartAddress();
     params.end = config.GetEndAddress();
@@ -590,6 +710,20 @@ SurfaceId RasterizerCache<T>::GetTextureSurface(const Pica::Texture::TextureInfo
     params.is_tiled = true;
     params.pixel_format = PixelFormatFromTextureFormat(info.format);
     params.res_scale = filter != Settings::TextureFilter::NoFilter ? resolution_scale_factor : 1;
+    if (PocDownloadLog::TraceActive()) {
+        SurfaceParams trace_params = params;
+        trace_params.levels = 1;
+        trace_params.UpdateParams();
+        if (PocDownloadLog::TraceOverlaps(trace_params.addr, trace_params.size)) {
+            static std::string last;
+            std::string line = fmt::format("texture {} levels {}",
+                                           PocDownloadLog::Describe(trace_params), max_level + 1);
+            if (line != last) {
+                LOG_INFO(Render, "Trace: {}", line);
+                last = std::move(line);
+            }
+        }
+    }
     SurfaceFlagBits initial_flags{};
     if (info.is_shadow_source) {
         initial_flags |= SurfaceFlagBits::ShadowSource;
@@ -748,6 +882,21 @@ FramebufferHelper<T> RasterizerCache<T>::GetFramebufferSurfaces(bool using_color
     depth_params.pixel_format = PixelFormatFromDepthFormat(config.depth_format);
     depth_params.UpdateParams();
 
+    if (PocDownloadLog::TraceActive() &&
+        ((using_color_fb && PocDownloadLog::TraceOverlaps(color_params.addr, color_params.size)) ||
+         (using_depth_fb && PocDownloadLog::TraceOverlaps(depth_params.addr, depth_params.size)))) {
+        static std::string last;
+        std::string line = fmt::format(
+            "framebuffer color {} {} depth {} {} viewport {},{},{},{}",
+            using_color_fb ? PocDownloadLog::Describe(color_params) : std::string{"off"},
+            using_color_fb ? "on" : "", using_depth_fb ? PocDownloadLog::Describe(depth_params) : std::string{"off"},
+            using_depth_fb ? "on" : "", viewport_clamped.left, viewport_clamped.top,
+            viewport_clamped.right, viewport_clamped.bottom);
+        if (line != last) {
+            LOG_INFO(Render, "Trace: {}", line);
+            last = std::move(line);
+        }
+    }
     auto color_vp_interval = color_params.GetSubRectInterval(viewport_clamped);
     auto depth_vp_interval = depth_params.GetSubRectInterval(viewport_clamped);
 
@@ -1059,7 +1208,15 @@ void RasterizerCache<T>::ValidateSurface(SurfaceId surface_id, PAddr addr, u32 s
             continue;
         }
 
+        PocDownloadLog::reason =
+            fmt::format("validate {} {}x{}{}", PixelFormatAsString(params.pixel_format),
+                        params.width, params.height, params.is_tiled ? " tiled" : "");
+        PocDownloadLog::validate_detail =
+            fmt::format("validating surface {} interval {:#x}-{:#x}",
+                        PocDownloadLog::Describe(surface), interval.lower(), interval.upper());
         FlushRegion(params.addr, params.size);
+        PocDownloadLog::reason.clear();
+        PocDownloadLog::validate_detail.clear();
         if (!use_custom_textures || !UploadCustomSurface(surface_id, interval)) {
             UploadSurface(slot_surfaces[surface_id], interval);
         }
@@ -1257,7 +1414,33 @@ void RasterizerCache<T>::DownloadSurface(Surface& surface, SurfaceInterval inter
         .texture_rect = surface.GetSubRect(flush_info),
         .texture_level = surface.LevelOf(flush_start),
     };
+    const auto download_start = std::chrono::steady_clock::now();
     surface.Download(download, staging);
+    if (PocDownloadLog::TraceActive()) {
+        LOG_INFO(Render, "Trace: download {} {:#x}-{:#x} reason '{}' caller '{}'",
+                 PocDownloadLog::Describe(surface), interval.lower(), interval.upper(),
+                 PocDownloadLog::reason, PocDownloadLog::caller.substr(0, 11));
+    }
+    if (!PocDownloadLog::reason.empty()) {
+        PocDownloadLog::LogDetailOnce(fmt::format(
+            "{} | {} | downloads {} flush {:#x}-{:#x}",
+            PocDownloadLog::caller.empty() ? "caller other" : PocDownloadLog::caller,
+            PocDownloadLog::validate_detail, PocDownloadLog::Describe(surface),
+            interval.lower(), interval.upper()));
+    }
+    PocDownloadLog::Record(
+        fmt::format("{}{} <- {} {}x{} scale {}{}",
+                    PocDownloadLog::caller.empty()
+                        ? std::string{}
+                        : PocDownloadLog::caller.substr(0, PocDownloadLog::caller.find(' ', 4)) +
+                              " ",
+                    PocDownloadLog::reason.empty() ? "other" : PocDownloadLog::reason,
+                    PixelFormatAsString(surface.pixel_format), surface.width, surface.height,
+                    surface.res_scale, surface.is_tiled ? " tiled" : ""),
+        staging.size,
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                             download_start)
+            .count());
 
     MemoryRef dest_ptr = memory.GetPhysicalRef(flush_start);
     if (!dest_ptr) [[unlikely]] {
@@ -1331,32 +1514,78 @@ bool RasterizerCache<T>::ValidateByReinterpretation(Surface& surface, SurfacePar
         return runtime.Reinterpret(src_surface, surface, reinterpret);
     }
 
-    bool has_invalid = false;
+    // PoC: compute the pre-#2451, #2451 and fixed decisions, return the one AZAHAR_FILL_GUARD
+    // selects (pre2451 | 2451 | unset = fixed; AZAHAR_OLD_FILL_GUARD=1 means 2451), and log
+    // every validation where they disagree.
     const PAddr addr = boost::icl::lower(interval);
     const u32 size = boost::icl::length(interval);
-
-    ForEachSurfaceInRegion(addr, size, [&](auto, auto& cached_surface) {
-        if (cached_surface.pixel_format == PixelFormat::Invalid) {
-            has_invalid = true;
-            return true;
+    bool any_fill = false;
+    bool live_fill = false;
+    SurfaceId fill_id{};
+    ForEachSurfaceInRegion(addr, size, [&](SurfaceId id, auto& cached_surface) {
+        if (cached_surface.pixel_format != PixelFormat::Invalid) {
+            return;
         }
-        return false;
+        any_fill = true;
+        fill_id = id;
+        if (!boost::icl::contains(cached_surface.invalid_regions,
+                                  interval & cached_surface.GetInterval())) {
+            live_fill = true;
+        }
     });
-
-    if (has_invalid) {
-        return false;
-    }
-
-    if (!boost::icl::contains(dirty_regions, interval)) {
-        return false;
-    }
-
+    const bool fully_dirty = boost::icl::contains(dirty_regions, interval);
     const auto it = dirty_regions.find(interval);
-    if (it == dirty_regions.end() || !it->second) {
-        return false;
+    const bool owner_ok = it != dirty_regions.end() && it->second;
+    const bool stride_differs = owner_ok && slot_surfaces[it->second].stride != surface.stride;
+
+    const bool skip_pre2451 = stride_differs;
+    const bool skip_2451 = !any_fill && fully_dirty && stride_differs;
+    const bool skip_fixed = !live_fill && fully_dirty && stride_differs;
+
+    static const int mode = [] {
+        const char* env = std::getenv("AZAHAR_FILL_GUARD");
+        if (env && std::string_view{env} == "pre2451") {
+            return 0;
+        }
+        if ((env && std::string_view{env} == "2451") || std::getenv("AZAHAR_OLD_FILL_GUARD")) {
+            return 1;
+        }
+        return 2;
+    }();
+    static const bool logged_mode = [] {
+        LOG_INFO(Render, "FillGuard mode {}", mode == 0 ? "pre2451" : (mode == 1 ? "2451" : "fixed"));
+        return true;
+    }();
+    (void)logged_mode;
+
+    if (skip_pre2451 != skip_2451 || skip_2451 != skip_fixed) {
+        static std::map<std::string, u64> counts;
+        static auto window = std::chrono::steady_clock::now();
+        static std::map<std::string, u32> details_per_kind;
+        const std::string kind = fmt::format(
+            "pre2451 {} / 2451 {} / fixed {} ({})", skip_pre2451 ? "skip" : "validate",
+            skip_2451 ? "skip" : "validate", skip_fixed ? "skip" : "validate",
+            any_fill ? (live_fill ? "live fill" : "replaced fill") : (fully_dirty ? "no fill" : "partly dirty"));
+        ++counts[kind];
+        if (u32& details = details_per_kind[kind]; details < 15) {
+            ++details;
+            LOG_INFO(Render, "FillGuard diff #{}: {} | validating {} interval {:#x}-{:#x} | owner {} | fill {}",
+                     details, kind, PocDownloadLog::Describe(surface), interval.lower(),
+                     interval.upper(),
+                     owner_ok ? PocDownloadLog::Describe(slot_surfaces[it->second]) : std::string{"none"},
+                     fill_id ? PocDownloadLog::Describe(slot_surfaces[fill_id]) : std::string{"none"});
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now - window >= std::chrono::seconds{10}) {
+            for (const auto& [k, n] : counts) {
+                LOG_INFO(Render, "FillGuard diff (10 s): {} x{}", k, n);
+            }
+            counts.clear();
+            window = now;
+        }
     }
 
-    return slot_surfaces[it->second].stride != surface.stride;
+    return mode == 0 ? skip_pre2451 : (mode == 1 ? skip_2451 : skip_fixed);
 }
 
 template <class T>
@@ -1391,6 +1620,15 @@ void RasterizerCache<T>::FlushRegion(PAddr addr, u32 size, SurfaceId flush_surfa
 
     const SurfaceInterval flush_interval(addr, addr + size);
     SurfaceRegions flushed_intervals;
+    if (PocDownloadLog::TraceActive() && PocDownloadLog::TraceOverlaps(addr, size) &&
+        PocDownloadLog::reason.empty() && PocDownloadLog::caller.empty()) {
+        u32 dirty = 0;
+        for (const auto& [region, surface_id] : RangeFromInterval(dirty_regions, flush_interval)) {
+            dirty += static_cast<u32>(boost::icl::length(region & flush_interval));
+        }
+        LOG_INFO(Render, "Trace: flush (external) {:#x}-{:#x} dirty bytes {}", addr, addr + size,
+                 dirty);
+    }
 
     for (const auto& [region, surface_id] : RangeFromInterval(dirty_regions, flush_interval)) {
         if (flush_surface_id && surface_id != flush_surface_id) {
@@ -1442,6 +1680,11 @@ void RasterizerCache<T>::InvalidateRegion(PAddr addr, u32 size, SurfaceId region
     }
 
     const SurfaceInterval invalid_interval(addr, addr + size);
+    if (PocDownloadLog::TraceActive() && PocDownloadLog::TraceOverlaps(addr, size)) {
+        LOG_INFO(Render, "Trace: invalidate {:#x}-{:#x} owner {}", addr, addr + size,
+                 region_owner_id ? PocDownloadLog::Describe(slot_surfaces[region_owner_id])
+                                 : std::string{"cpu"});
+    }
 
     if (region_owner_id) {
         Surface& region_owner = slot_surfaces[region_owner_id];

@@ -2,7 +2,12 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <vector>
 #include "common/archives.h"
+#include "core/frontend/framebuffer_layout.h"
 #include "common/hacks/hack_manager.h"
 #include "common/microprofile.h"
 #include "core/core.h"
@@ -567,6 +572,34 @@ void GPU::VBlankCallback(std::uintptr_t user_data, s64 cycles_late) {
     // Signal to GSP that GPU interrupt has occurred
     impl->signal_interrupt(Service::GSP::InterruptId::PDC0, 0);
     impl->signal_interrupt(Service::GSP::InterruptId::PDC1, 0);
+
+    // PoC: AZAHAR_SHOT_EVERY=N writes the frame presented at every Nth VBlank, counted in
+    // emulated time, to $AZAHAR_SHOT_DIR/<vblank>.rgba ("W H\n" then RGBA rows).
+    static const u32 poc_shot_every = [] {
+        const char* env = std::getenv("AZAHAR_SHOT_EVERY");
+        return env ? static_cast<u32>(std::atoi(env)) : 0u;
+    }();
+    static u64 poc_vblank = 0;
+    ++poc_vblank;
+    if (poc_shot_every && poc_vblank % poc_shot_every == 0 &&
+        !impl->renderer->IsScreenshotPending()) {
+        const auto layout = Layout::FrameLayoutFromResolutionScale(1);
+        auto buffer = std::make_shared<std::vector<u8>>(layout.width * layout.height * 4);
+        const char* dir = std::getenv("AZAHAR_SHOT_DIR");
+        const std::string path = fmt::format("{}/{:07}.rgba", dir ? dir : ".", poc_vblank);
+        const u32 w = layout.width;
+        const u32 h = layout.height;
+        impl->renderer->RequestScreenshot(
+            buffer->data(),
+            [buffer, path, w, h](bool) {
+                if (std::FILE* f = std::fopen(path.c_str(), "wb")) {
+                    std::fprintf(f, "%u %u\n", w, h);
+                    std::fwrite(buffer->data(), 1, buffer->size(), f);
+                    std::fclose(f);
+                }
+            },
+            layout);
+    }
 
     // Present renderered frame.
     impl->renderer->SwapBuffers();
