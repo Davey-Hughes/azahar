@@ -8,6 +8,7 @@
 
 #include "video_core/rasterizer_accelerated.h"
 #include "video_core/renderer_vulkan/vk_descriptor_update_queue.h"
+#include "video_core/renderer_vulkan/vk_gpu_draw_timer.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_render_manager.h"
 #include "video_core/renderer_vulkan/vk_stream_buffer.h"
@@ -185,6 +186,26 @@ private:
     enum class DrawPath : u8 { Specialized, UberGpu, Handoff, Fallback, Software };
     std::chrono::steady_clock::time_point handoff_time{};
     std::chrono::steady_clock::time_point last_frame_time{};
+    // PoC profiling, AZAHAR_SLOW_FRAME_MS=N: log every frame slower than N ms, split into CPU
+    // time, Draw() time and waits (RasterizerVulkan::LogSlowFrame()). 0 = off.
+    u32 slow_frame_ms{};
+    struct FrameStats {
+        u64 draw_ns{};
+        u64 draws{};
+        u64 uber_draws{};
+        u64 wait_worker_ns{};
+    } frame_stats;
+    u64 last_frame_cpu_ns{};
+    u64 last_pipeline_wait_ns{};
+    u64 last_runq_ns{};
+    u64 last_vcsw{};
+    u64 last_ivcsw{};
+    void LogSlowFrame(std::chrono::steady_clock::time_point now);
+    // GpuDrawTimer category: DrawPath * 2, plus 1 for 6 or fewer vertices.
+    [[nodiscard]] std::size_t GpuDrawCategory(DrawPath path) const {
+        return static_cast<std::size_t>(path) * 2 + (regs.pipeline.num_vertices <= 6 ? 1 : 0);
+    }
+    mutable GpuDrawTimer gpu_draw_timer{instance, scheduler};
 };
 
 } // namespace Vulkan

@@ -165,6 +165,13 @@ public:
 private:
     friend ShaderDiskCache;
 
+    Common::ThreadWorker& VertexShaderWorkers() {
+        return priority_workers.NumWorkers() > 0 ? priority_workers : shader_workers;
+    }
+    Common::ThreadWorker& UberPipelineWorkers() {
+        return priority_workers.NumWorkers() > 0 ? priority_workers : pipeline_workers;
+    }
+
     /// Loads the driver pipeline cache
     void LoadDriverPipelineDiskCache(const std::atomic_bool& stop_loading = std::atomic_bool{false},
                                      const VideoCore::DiskResourceLoadCallback& callback = {});
@@ -219,6 +226,9 @@ private:
     std::size_t num_worker_threads;
     Common::ThreadWorker pipeline_workers;
     Common::ThreadWorker shader_workers;
+    // PoC: AZAHAR_UBER_FIRST=N runs vertex shader compiles and ubershader pipeline builds on
+    // their own N workers, so they don't queue behind specialized work. 0 (default) = upstream.
+    Common::ThreadWorker priority_workers;
     PipelineInfo current_info{};
     GraphicsPipeline* current_pipeline{};
     std::array<DescriptorHeap, NumDescriptorHeaps> descriptor_heaps;

@@ -123,7 +123,7 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseProgrammableVer
 
             shader.program = std::move(program);
             const vk::Device device = parent.instance.GetDevice();
-            parent.shader_workers.QueueWork([device, &shader, this, spirv_id] {
+            parent.VertexShaderWorkers().QueueWork([device, &shader, this, spirv_id] {
                 ApplyCompileWorkerNice();
                 auto spirv = CompileGLSL(shader.program, vk::ShaderStageFlagBits::eVertex);
                 AppendVSSPIRV(vs_cache, spirv, spirv_id);
@@ -245,7 +245,9 @@ GraphicsPipeline* ShaderDiskCache::GetPipeline(const PipelineInfo& info) {
 
     auto [it, new_pipeline] = graphics_pipelines.try_emplace(optimized_hash);
     if (new_pipeline) {
-        if (info.state.shader_ids[ProgramType::FS] == PipelineCache::UBERSHADER_FS_HASH) {
+        const bool uber_fs =
+            info.state.shader_ids[ProgramType::FS] == PipelineCache::UBERSHADER_FS_HASH;
+        if (uber_fs) {
             parent.ubershader_pipeline_count.fetch_add(1, std::memory_order_relaxed);
         } else {
             parent.specialized_pipeline_count.fetch_add(1, std::memory_order_relaxed);
@@ -260,7 +262,8 @@ GraphicsPipeline* ShaderDiskCache::GetPipeline(const PipelineInfo& info) {
         }
         it.value() = std::make_unique<GraphicsPipeline>(
             parent.instance, parent.renderpass_cache, info, *parent.driver_pipeline_cache,
-            *parent.pipeline_layout, parent.current_shaders, &parent.pipeline_workers);
+            *parent.pipeline_layout, parent.current_shaders,
+            uber_fs ? &parent.UberPipelineWorkers() : &parent.pipeline_workers);
     }
 
     // Ubershader pipelines are transient stand-ins; their FS hash is not a cached shader, so an

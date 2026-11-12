@@ -2,6 +2,7 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <cstdlib>
 #include <chrono>
 #include <boost/container/static_vector.hpp>
 
@@ -86,13 +87,35 @@ constexpr std::array<vk::DescriptorSetLayoutBinding, 2> UTILITY_BINDINGS = {{
      vk::ShaderStageFlagBits::eFragment}, // tex_normal
 }};
 
+// PoC: AZAHAR_PIPELINE_WORKERS=N overrides the pipeline and shader worker counts.
+static std::size_t PipelineWorkerCount() {
+    if (const char* env = std::getenv("AZAHAR_PIPELINE_WORKERS")) {
+        if (const unsigned long n = std::strtoul(env, nullptr, 10); n > 0) {
+            LOG_INFO(Render_Vulkan, "Pipeline and shader workers: {} each (env)", n);
+            return n;
+        }
+    }
+    return std::max(std::thread::hardware_concurrency(), 2U) / 2;
+}
+
+static std::size_t PriorityWorkerCount() {
+    if (const char* env = std::getenv("AZAHAR_UBER_FIRST")) {
+        if (const unsigned long n = std::strtoul(env, nullptr, 10); n > 0) {
+            LOG_INFO(Render_Vulkan, "Priority workers (VS + ubershader pipelines): {} (env)", n);
+            return n;
+        }
+    }
+    return 0;
+}
+
 PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                              RenderManager& renderpass_cache_, DescriptorUpdateQueue& update_queue_)
     : instance{instance_}, scheduler{scheduler_}, renderpass_cache{renderpass_cache_},
       update_queue{update_queue_},
-      num_worker_threads{std::max(std::thread::hardware_concurrency(), 2U) / 2},
+      num_worker_threads{PipelineWorkerCount()},
       pipeline_workers{num_worker_threads, "Pipeline workers"},
       shader_workers{num_worker_threads, "Shader workers"},
+      priority_workers{PriorityWorkerCount(), "Priority workers"},
       descriptor_heaps{
           DescriptorHeap{instance, scheduler.GetMasterSemaphore(), BUFFER_BINDINGS, 32},
           DescriptorHeap{instance, scheduler.GetMasterSemaphore(), TEXTURE_BINDINGS<1>},
@@ -162,6 +185,7 @@ void PipelineCache::BuildLayout() {
 PipelineCache::~PipelineCache() {
     pipeline_workers.WaitForRequests();
     shader_workers.WaitForRequests();
+    priority_workers.WaitForRequests();
     SaveDriverPipelineDiskCache();
 }
 

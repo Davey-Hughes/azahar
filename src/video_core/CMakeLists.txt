@@ -170,6 +170,8 @@ if (ENABLE_VULKAN)
         renderer_vulkan/vk_descriptor_update_queue.h
         renderer_vulkan/vk_graphics_pipeline.cpp
         renderer_vulkan/vk_graphics_pipeline.h
+        renderer_vulkan/vk_gpu_draw_timer.cpp
+        renderer_vulkan/vk_gpu_draw_timer.h
         renderer_vulkan/vk_master_semaphore.cpp
         renderer_vulkan/vk_master_semaphore.h
         renderer_vulkan/vk_memory_util.cpp

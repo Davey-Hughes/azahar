@@ -5,6 +5,9 @@
 #include <cstdlib>
 #include <optional>
 #include <string_view>
+#include <time.h>
+#include <unistd.h>
+#include <sys/resource.h>
 
 #include "common/alignment.h"
 #include "common/literals.h"
@@ -118,7 +121,10 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
         .range = VK_WHOLE_SIZE,
     });
 
-    scheduler.RegisterOnSubmit([&renderpass_cache] { renderpass_cache.EndRendering(); });
+    scheduler.RegisterOnSubmit([this, &renderpass_cache] {
+        renderpass_cache.EndRendering();
+        gpu_draw_timer.OnSubmit();
+    });
 
     // Prepare the static buffer descriptor set.
     const auto buffer_set = pipeline_cache.Acquire(DescriptorHeapType::Buffer);
@@ -158,6 +164,10 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
     force_ubershader = use_ubershaders && std::getenv("AZAHAR_UBERSHADER_FORCE") != nullptr;
     const char* small_draws = std::getenv("AZAHAR_UBERSHADER_SMALL_DRAWS");
     ubershader_small_draws = !(small_draws && std::string_view{small_draws} == "0");
+    if (const char* slow_ms = std::getenv("AZAHAR_SLOW_FRAME_MS")) {
+        slow_frame_ms = static_cast<u32>(std::strtoul(slow_ms, nullptr, 10));
+        LOG_INFO(Render_Vulkan, "Slow frame log: frames over {} ms", slow_frame_ms);
+    }
     const char* worker_nice = std::getenv("AZAHAR_WORKER_NICE");
     LOG_INFO(Render_Vulkan,
              "Ubershaders: {} (cpu vertex: {}, forced: {}, small draws: {}, worker nice: {})",
@@ -170,7 +180,11 @@ RasterizerVulkan::~RasterizerVulkan() {
 }
 
 void RasterizerVulkan::TickFrame() {
+    const auto wait_start = std::chrono::steady_clock::now();
     scheduler.WaitWorker();
+    frame_stats.wait_worker_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::steady_clock::now() - wait_start)
+                                      .count();
     res_cache.TickFrame();
 
     const auto now = std::chrono::steady_clock::now();
@@ -178,10 +192,59 @@ void RasterizerVulkan::TickFrame() {
         now - last_frame_time > std::chrono::milliseconds{50}) {
         ++uber_stats.slow_frames;
     }
+    if (slow_frame_ms != 0) {
+        LogSlowFrame(now);
+    }
     last_frame_time = now;
     if (++uber_stats.frames % 600 == 0) {
         LogUbershaderStats();
     }
+}
+
+void RasterizerVulkan::LogSlowFrame(std::chrono::steady_clock::time_point now) {
+    timespec ts{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    const u64 cpu_ns = static_cast<u64>(ts.tv_sec) * 1'000'000'000 + static_cast<u64>(ts.tv_nsec);
+    const u64 pipeline_wait_ns = pipeline_cache.GetWaitStats().ns;
+    // Run-queue wait: time the thread was runnable but not running (preempted).
+    u64 sched_runq_ns = 0;
+    if (std::FILE* f = std::fopen("/proc/thread-self/schedstat", "r")) {
+        unsigned long long run = 0, wait = 0;
+        if (std::fscanf(f, "%llu %llu", &run, &wait) == 2) {
+            sched_runq_ns = wait;
+        }
+        std::fclose(f);
+    }
+    rusage usage{};
+    getrusage(RUSAGE_THREAD, &usage);
+    const u64 vcsw = static_cast<u64>(usage.ru_nvcsw);
+    const u64 ivcsw = static_cast<u64>(usage.ru_nivcsw);
+    if (last_frame_time.time_since_epoch().count() != 0) {
+        const auto ns_since_epoch = [](std::chrono::steady_clock::time_point t) {
+            return std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch())
+                .count();
+        };
+        const s64 start_ns = ns_since_epoch(last_frame_time);
+        const s64 end_ns = ns_since_epoch(now);
+        if (end_ns - start_ns > static_cast<s64>(slow_frame_ms) * 1'000'000) {
+            LOG_INFO(Render_Vulkan,
+                     "Slow frame: frame={} tid={} start_ns={} end_ns={} wall={:.1f}ms cpu={:.1f}ms "
+                     "draw={:.1f}ms draws={} uber_draws={} wait_worker={:.1f}ms "
+                     "pipeline_wait={:.1f}ms runq={:.1f}ms vcsw={} ivcsw={}",
+                     uber_stats.frames, static_cast<long>(gettid()), start_ns, end_ns,
+                     (end_ns - start_ns) / 1e6, (cpu_ns - last_frame_cpu_ns) / 1e6,
+                     frame_stats.draw_ns / 1e6, frame_stats.draws, frame_stats.uber_draws,
+                     frame_stats.wait_worker_ns / 1e6,
+                     (pipeline_wait_ns - last_pipeline_wait_ns) / 1e6,
+                     (sched_runq_ns - last_runq_ns) / 1e6, vcsw - last_vcsw, ivcsw - last_ivcsw);
+        }
+    }
+    last_frame_cpu_ns = cpu_ns;
+    last_pipeline_wait_ns = pipeline_wait_ns;
+    last_runq_ns = sched_runq_ns;
+    last_vcsw = vcsw;
+    last_ivcsw = ivcsw;
+    frame_stats = {};
 }
 
 void RasterizerVulkan::LogUbershaderStats() const {
@@ -221,6 +284,13 @@ void RasterizerVulkan::LogDrawTimes() const {
     }
     LOG_INFO(Render_Vulkan, "Ubershader draw time (count/ms):{} cpu_vs={}ms", line,
              uber_stats.cpu_vs_ns / 1'000'000);
+    if (gpu_draw_timer.IsEnabled()) {
+        static constexpr std::array<const char*, GpuDrawTimer::NumCategories> gpu_names{
+            "specialized", "specialized_small", "uber_gpu", "uber_gpu_small", "handoff",
+            "handoff_small", "fallback", "fallback_small", "software", "software_small"};
+        LOG_INFO(Render_Vulkan, "GPU draw time (count/ms/avg):{}",
+                 gpu_draw_timer.Summary(gpu_names));
+    }
 }
 
 void RasterizerVulkan::LoadDefaultDiskResources(
@@ -590,7 +660,13 @@ bool RasterizerVulkan::AccelerateDrawBatchInternal(bool is_indexed, bool force_w
         .is_indexed = is_indexed,
     };
 
-    scheduler.Record([this, params](vk::CommandBuffer cmdbuf) {
+    const bool uber_fs = pipeline_info.state.shader_ids[Pica::Shader::Generator::ProgramType::FS] ==
+                         PipelineCache::UBERSHADER_FS_HASH;
+    const auto timing =
+        gpu_draw_timer.Reserve(GpuDrawCategory(uber_fs ? DrawPath::UberGpu : DrawPath::Specialized));
+
+    scheduler.Record([this, params, timing](vk::CommandBuffer cmdbuf) {
+        GpuDrawTimer::WriteBefore(cmdbuf, timing);
         std::array<vk::DeviceSize, 16> offsets;
         std::transform(params.bindings.begin(), params.bindings.end(), offsets.begin(),
                        [](u32 offset) { return static_cast<vk::DeviceSize>(offset); });
@@ -600,6 +676,7 @@ bool RasterizerVulkan::AccelerateDrawBatchInternal(bool is_indexed, bool force_w
         } else {
             cmdbuf.draw(params.vertex_count, 1, 0, 0);
         }
+        GpuDrawTimer::WriteAfter(cmdbuf, timing);
     });
 
     return true;
@@ -669,11 +746,16 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
                                        : DrawPath::Software;
     SCOPE_EXIT({
         const auto path = static_cast<std::size_t>(draw_path);
-        uber_stats.draw_ns[path][draw_size] +=
-            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
-                                                                 draw_start)
-                .count();
+        const u64 elapsed_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - draw_start)
+                                   .count();
+        uber_stats.draw_ns[path][draw_size] += elapsed_ns;
         ++uber_stats.draw_count[path][draw_size];
+        frame_stats.draw_ns += elapsed_ns;
+        ++frame_stats.draws;
+        if (draw_path == DrawPath::UberGpu || draw_path == DrawPath::Fallback) {
+            ++frame_stats.uber_draws;
+        }
     });
 
     SyncDrawState();
@@ -806,9 +888,13 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
         std::memcpy(buffer, vertex_batch.data(), vertex_size);
         stream_buffer.Commit(vertex_size);
 
-        scheduler.Record([this, offset = offset, vertex_count](vk::CommandBuffer cmdbuf) {
+        const auto timing = gpu_draw_timer.Reserve(
+            GpuDrawCategory(fallback_draw ? DrawPath::Fallback : DrawPath::Software));
+        scheduler.Record([this, offset = offset, vertex_count, timing](vk::CommandBuffer cmdbuf) {
+            GpuDrawTimer::WriteBefore(cmdbuf, timing);
             cmdbuf.bindVertexBuffers(0, stream_buffer.Handle(), offset);
             cmdbuf.draw(vertex_count, 1, 0, 0);
+            GpuDrawTimer::WriteAfter(cmdbuf, timing);
         });
     }
 
