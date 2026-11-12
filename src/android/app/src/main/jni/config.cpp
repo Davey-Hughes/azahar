@@ -365,6 +365,7 @@ void Config::ReadValues() {
     ReadSetting("Debugging", Settings::values.use_gdbstub);
     ReadSetting("Debugging", Settings::values.gdbstub_port);
     ReadSetting("Debugging", Settings::values.instant_debug_log);
+    ReadSetting("Debugging", Settings::values.deterministic_async_operations);
     ReadSetting("Debugging", Settings::values.enable_rpc_server);
     ReadSetting("Debugging", Settings::values.toggle_unique_data_console_type);
     ReadSetting("Debugging", Settings::values.enable_exception_handler);

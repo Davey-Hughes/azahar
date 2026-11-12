@@ -3,10 +3,12 @@
 // Refer to the LICENSE.txt file included.
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <codecvt>
 #include <thread>
 #include <dlfcn.h>
+#include <sys/system_properties.h>
 
 #include <android/api-level.h>
 #include <android/native_window_jni.h>
@@ -234,11 +236,46 @@ static void WaitForEmulationSurfaces(std::unique_lock<std::recursive_mutex>& sur
     surface_cv.wait(surface_lock, [] { return s_surface != nullptr; });
 }
 
+// PoC only: an app process doesn't inherit adb's environment, so the AZAHAR_* toggles are read
+// from system properties instead: `adb shell setprop debug.azahar_uber_first front` sets
+// AZAHAR_UBER_FIRST=front. An empty property clears the variable.
+static std::string GetPocProperty(const std::string& prop) {
+    std::string value;
+    if (const prop_info* info = __system_property_find(prop.c_str())) {
+        __system_property_read_callback(
+            info,
+            [](void* out, const char*, const char* v, uint32_t) {
+                *static_cast<std::string*>(out) = v;
+            },
+            &value);
+    }
+    return value;
+}
+
+static void ImportPocTogglesFromProperties() {
+    static constexpr std::array names{
+        "AZAHAR_PIPELINE_WORKERS",       "AZAHAR_UBER_FIRST",
+        "AZAHAR_SLOW_FRAME_MS",          "AZAHAR_UBERSHADER_FORCE",
+        "AZAHAR_UBERSHADER_SMALL_DRAWS", "AZAHAR_GPU_DRAW_TIMING",
+    };
+    for (const char* name : names) {
+        const std::string prop = "debug." + Common::ToLower(name);
+        const std::string value = GetPocProperty(prop);
+        if (value.empty()) {
+            unsetenv(name);
+        } else {
+            setenv(name, value.c_str(), 1);
+            LOG_INFO(Frontend, "PoC toggle from {}: {}={}", prop, name, value);
+        }
+    }
+}
+
 static Core::System::ResultStatus RunCitra(const std::string& filepath) {
     // Citra core only supports a single running instance
     std::scoped_lock lock(running_mutex);
 
     LOG_INFO(Frontend, "Azahar starting...");
+    ImportPocTogglesFromProperties();
 
     MicroProfileOnThreadCreate("EmuThread");
 
@@ -367,6 +404,15 @@ static Core::System::ResultStatus RunCitra(const std::string& filepath) {
 
     window->MakeCurrent();
 
+    // PoC only: `adb shell setprop debug.azahar_movie_play <path>` replays a movie from boot, the
+    // way the Qt frontend's -p does (GMainWindow::BootGame()). The path must be readable by the
+    // app, e.g. its private files dir.
+    const std::string movie_play = GetPocProperty("debug.azahar_movie_play");
+    if (!movie_play.empty()) {
+        LOG_INFO(Frontend, "PoC movie playback: {}", movie_play);
+        system.Movie().PrepareForPlayback(movie_play);
+    }
+
     const Core::System::ResultStatus load_result{
         system.Load(*window, filepath, secondary_window.get())};
 
@@ -375,6 +421,10 @@ static Core::System::ResultStatus RunCitra(const std::string& filepath) {
 
     if (load_result != Core::System::ResultStatus::Success) {
         return load_result;
+    }
+
+    if (!movie_play.empty()) {
+        system.Movie().StartPlayback(movie_play);
     }
 
     stop_run = false;
