@@ -254,7 +254,7 @@ struct StaticPipelineInfo {
     [[nodiscard]] u64 OptimizedHash(const Instance& instance) const;
 
     static consteval u64 StructHash() {
-        constexpr u64 STRUCT_VERSION = 0;
+        constexpr u64 STRUCT_VERSION = 1;
 
         using T = StaticPipelineInfo;
         return Common::HashCombine(
