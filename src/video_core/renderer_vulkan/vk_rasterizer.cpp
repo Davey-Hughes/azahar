@@ -636,13 +636,34 @@ bool RasterizerVulkan::AccelerateDrawBatch(bool is_indexed) {
     return Draw(true, is_indexed);
 }
 
+void RasterizerVulkan::PocNoteVsBools() {
+    // PoC (AZAHAR_LOG_VS_BOOLS=1): log each new combination of vertex shader (config hash, as in
+    // the pipeline key) and PICA bool uniforms seen by an accelerated draw.
+    static const bool enabled = std::getenv("AZAHAR_LOG_VS_BOOLS") != nullptr;
+    if (!enabled) {
+        return;
+    }
+    u32 bools = 0;
+    for (u32 i = 0; i < pica.vs_setup.uniforms.b.size(); i++) {
+        bools |= u32{pica.vs_setup.uniforms.b[i]} << i;
+    }
+    const u64 vs = pipeline_info.state.shader_ids[0];
+    auto& seen = poc_vs_bools[vs];
+    if (seen.insert(bools).second) {
+        LOG_INFO(Render_Vulkan, "PoC VS bools: vs={:016x} b={:04x} combos_for_vs={} vs_seen={}",
+                 vs, bools, seen.size(), poc_vs_bools.size());
+    }
+}
+
 bool RasterizerVulkan::AccelerateDrawBatchInternal(bool is_indexed, bool force_wait) {
     if (is_indexed) {
         SetupIndexArray();
     }
 
     const bool wait_built = force_wait || !async_shaders || regs.pipeline.num_vertices <= 6;
-    if (!pipeline_cache.BindPipeline(pipeline_info, wait_built)) {
+    const bool poc_bound = pipeline_cache.BindPipeline(pipeline_info, wait_built);
+    PocNoteVsBools();
+    if (!poc_bound) {
         if (uber_stats.skipped < 40) {
             using Pica::Shader::Generator::ProgramType;
             LOG_INFO(Render_Vulkan,
