@@ -184,6 +184,11 @@ public:
         return poc_uber_gpl;
     }
 
+    /// PoC (AZAHAR_PIPELINE_STATS=1): capture and log per-stage pipeline statistics.
+    bool IsPocPipelineStatsEnabled() const {
+        return poc_pipeline_stats;
+    }
+
     /// Returns true when VK_EXT_shader_stencil_export is supported
     bool IsShaderStencilExportSupported() const {
         return shader_stencil_export;
@@ -361,6 +366,7 @@ protected:
     bool depth_stencil_resolve{};
     bool pipeline_creation_cache_control{};
     bool poc_uber_gpl{};
+    bool poc_pipeline_stats{};
     bool fragment_shader_barycentric{};
     bool shader_stencil_export{};
     bool external_memory_host{};

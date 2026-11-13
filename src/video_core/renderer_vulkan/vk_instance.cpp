@@ -405,7 +405,8 @@ bool Instance::CreateDevice() {
         vk::PhysicalDevicePipelineCreationCacheControlFeaturesEXT,
         vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR,
         vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT,
-        vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>();
+        vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT,
+        vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR>();
     const vk::StructureChain properties_chain =
         physical_device
             .getProperties2<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceDriverProperties,
@@ -494,6 +495,11 @@ bool Instance::CreateDevice() {
     const bool has_graphics_pipeline_library =
         want_poc_gpl && add_extension(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME) &&
         add_extension(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+    // PoC: AZAHAR_PIPELINE_STATS=1 logs the driver's per-stage statistics for every pipeline.
+    const char* const poc_stats_env = std::getenv("AZAHAR_PIPELINE_STATS");
+    const bool has_pipeline_executable_properties =
+        poc_stats_env && std::string_view{poc_stats_env} == "1" &&
+        add_extension(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
 
     const auto family_properties = physical_device.getQueueFamilyProperties();
     if (family_properties.empty()) {
@@ -557,6 +563,7 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR{},
         vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT{},
         vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT{},
+        vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR{},
     };
 
 #define PROP_GET(structName, prop, property) property = properties_chain.get<structName>().prop;
@@ -651,6 +658,14 @@ bool Instance::CreateDevice() {
                         gpl_properties.graphicsPipelineLibraryFastLinking,
                         extended_dynamic_state, extended_dynamic_state3);
         }
+    }
+
+    if (has_pipeline_executable_properties) {
+        FEAT_SET(vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR,
+                 pipelineExecutableInfo, poc_pipeline_stats)
+        LOG_INFO(Render_Vulkan, "PoC pipeline statistics: {}", poc_pipeline_stats);
+    } else {
+        device_chain.unlink<vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR>();
     }
 
     if (has_custom_border_color) {

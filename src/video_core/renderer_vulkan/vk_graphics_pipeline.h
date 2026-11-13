@@ -344,6 +344,11 @@ public:
         poc_uber = uber;
     }
 
+    // PoC GPL: Build() only creates the shared fragment library (startup prewarm).
+    void SetPocFragmentOnly(bool fragment_only) noexcept {
+        poc_fragment_only = fragment_only;
+    }
+
     // PoC: what a draw that handed off to the CPU vertex path was waiting for.
     enum class PocWaitState : u8 { VsPending, FsPending, GsPending, Queued, Building, Count };
     PocWaitState PocNoteHandoff() noexcept;
@@ -355,6 +360,7 @@ public:
 private:
     using PocClock = std::chrono::steady_clock;
     void PocLogBuild(PocClock::time_point start, PocClock::time_point end, bool fast) const;
+    void PocLogStats() const;
 
     // PoC GPL: one fragment library per fragment state, shared across pipelines and threads.
     struct PocFragmentLibrary {
@@ -371,6 +377,7 @@ private:
     std::atomic<bool> poc_started{};
     std::atomic<u32> poc_handoffs{};
     bool poc_uber{};
+    bool poc_fragment_only{};
 
     const Instance& instance;
     RenderManager& renderpass_cache;

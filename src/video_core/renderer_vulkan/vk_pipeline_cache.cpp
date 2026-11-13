@@ -206,6 +206,45 @@ void PipelineCache::LoadCache(const std::atomic_bool& stop_loading,
     if (flag_set) {
         QueueClearCacheLoadFlag(GetProgramID());
     }
+    PocPrewarmFragmentLibraries();
+}
+
+void PipelineCache::PocPrewarmFragmentLibraries() {
+    if (!instance.IsPocUberGplEnabled() || !ubershader_fragment_shader ||
+        !ubershader_fragment_shader->Handle() || !driver_pipeline_cache ||
+        !poc_prewarm_pipelines.empty()) {
+        return;
+    }
+    // In order of first use in lm2. One task builds them one after another: four ubershader
+    // compiles in parallel took 4-5 s each on the Thor, versus 2.1 s for one alone.
+    using VideoCore::PixelFormat;
+    static constexpr std::array<std::pair<PixelFormat, PixelFormat>, 4> attachments{{
+        {PixelFormat::RGBA8, PixelFormat::Invalid},
+        {PixelFormat::RGBA8, PixelFormat::D24S8},
+        {PixelFormat::Invalid, PixelFormat::D24S8},
+        {PixelFormat::Invalid, PixelFormat::Invalid},
+    }};
+    for (const auto& [color, depth] : attachments) {
+        PipelineInfo info{};
+        info.state.attachments.color = color;
+        info.state.attachments.depth = depth;
+        info.state.attachments.sample_count = 1;
+        info.state.blending.blend_enable = 1;
+        auto& pipeline = poc_prewarm_pipelines.emplace_back(std::make_unique<GraphicsPipeline>(
+            instance, renderpass_cache, info, *driver_pipeline_cache, *pipeline_layout,
+            std::array<Shader*, 3>{&trivial_vertex_shader, ubershader_fragment_shader.get(),
+                                   nullptr},
+            &pipeline_workers));
+        pipeline->SetPocUber(true);
+        pipeline->SetPocFragmentOnly(true);
+    }
+    pipeline_workers.QueuePriorityWork([this] {
+        for (const auto& pipeline : poc_prewarm_pipelines) {
+            pipeline->Build();
+        }
+    });
+    LOG_INFO(Render_Vulkan, "PoC GPL: prewarming {} fragment libraries, one at a time",
+             poc_prewarm_pipelines.size());
 }
 
 void PipelineCache::SwitchCache(u64 title_id, const std::atomic_bool& stop_loading,

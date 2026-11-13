@@ -258,6 +258,7 @@ static void ImportPocTogglesFromProperties() {
         "AZAHAR_SLOW_FRAME_MS",          "AZAHAR_UBERSHADER_FORCE",
         "AZAHAR_UBERSHADER_SMALL_DRAWS", "AZAHAR_GPU_DRAW_TIMING",
         "AZAHAR_OLD_FILL_GUARD",         "AZAHAR_UBER_GPL",
+        "AZAHAR_PIPELINE_STATS",         "AZAHAR_IR3_SHADER_DEBUG",
     };
     for (const char* name : names) {
         const std::string prop = "debug." + Common::ToLower(name);
@@ -268,6 +269,13 @@ static void ImportPocTogglesFromProperties() {
             setenv(name, value.c_str(), 1);
             LOG_INFO(Frontend, "PoC toggle from {}: {}={}", prop, name, value);
         }
+    }
+    // Mesa's ir3 compiler (Turnip) reads IR3_SHADER_DEBUG when the driver creates its compiler,
+    // which happens after this, at Vulkan device creation.
+    if (const char* ir3 = std::getenv("AZAHAR_IR3_SHADER_DEBUG")) {
+        setenv("IR3_SHADER_DEBUG", ir3, 1);
+    } else {
+        unsetenv("IR3_SHADER_DEBUG");
     }
 }
 

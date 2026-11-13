@@ -2,7 +2,9 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <algorithm>
 #include <memory>
+#include <string>
 #include <unordered_map>
 
 #include <boost/container/static_vector.hpp>
@@ -86,6 +88,33 @@ vk::ColorBlendEquationEXT MakeBlendEquation(const BlendingState& blending) {
         eq.alphaBlendOp = vk::BlendOp::eAdd;
     }
     return eq;
+}
+
+boost::container::static_vector<vk::DynamicState, 16> MakeDynamicStates(const Instance& instance) {
+    boost::container::static_vector<vk::DynamicState, 16> dynamic_states = {
+        vk::DynamicState::eViewport,           vk::DynamicState::eScissor,
+        vk::DynamicState::eStencilCompareMask, vk::DynamicState::eStencilWriteMask,
+        vk::DynamicState::eStencilReference,   vk::DynamicState::eBlendConstants,
+    };
+
+    if (instance.IsExtendedDynamicStateSupported()) {
+        constexpr std::array extended = {
+            vk::DynamicState::eCullModeEXT,        vk::DynamicState::eDepthCompareOpEXT,
+            vk::DynamicState::eDepthTestEnableEXT, vk::DynamicState::eDepthWriteEnableEXT,
+            vk::DynamicState::eFrontFaceEXT,       vk::DynamicState::ePrimitiveTopologyEXT,
+            vk::DynamicState::eStencilOpEXT,       vk::DynamicState::eStencilTestEnableEXT,
+        };
+        dynamic_states.insert(dynamic_states.end(), extended.begin(), extended.end());
+    }
+
+    if (instance.IsExtendedDynamicState3Supported()) {
+        constexpr std::array dynamic_blend = {
+            vk::DynamicState::eColorBlendEquationEXT,
+            vk::DynamicState::eColorWriteMaskEXT,
+        };
+        dynamic_states.insert(dynamic_states.end(), dynamic_blend.begin(), dynamic_blend.end());
+    }
+    return dynamic_states;
 }
 
 Shader::Shader(const Instance& instance) : device{instance.GetDevice()} {}
@@ -258,30 +287,7 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         .pScissors = &scissor,
     };
 
-    boost::container::static_vector<vk::DynamicState, 16> dynamic_states = {
-        vk::DynamicState::eViewport,           vk::DynamicState::eScissor,
-        vk::DynamicState::eStencilCompareMask, vk::DynamicState::eStencilWriteMask,
-        vk::DynamicState::eStencilReference,   vk::DynamicState::eBlendConstants,
-    };
-
-    if (instance.IsExtendedDynamicStateSupported()) {
-        constexpr std::array extended = {
-            vk::DynamicState::eCullModeEXT,        vk::DynamicState::eDepthCompareOpEXT,
-            vk::DynamicState::eDepthTestEnableEXT, vk::DynamicState::eDepthWriteEnableEXT,
-            vk::DynamicState::eFrontFaceEXT,       vk::DynamicState::ePrimitiveTopologyEXT,
-            vk::DynamicState::eStencilOpEXT,       vk::DynamicState::eStencilTestEnableEXT,
-        };
-        dynamic_states.insert(dynamic_states.end(), extended.begin(), extended.end());
-    }
-
-    if (instance.IsExtendedDynamicState3Supported()) {
-        constexpr std::array dynamic_blend = {
-            vk::DynamicState::eColorBlendEquationEXT,
-            vk::DynamicState::eColorWriteMaskEXT,
-        };
-        dynamic_states.insert(dynamic_states.end(), dynamic_blend.begin(), dynamic_blend.end());
-    }
-
+    const auto dynamic_states = MakeDynamicStates(instance);
     const vk::PipelineDynamicStateCreateInfo dynamic_info = {
         .dynamicStateCount = static_cast<u32>(dynamic_states.size()),
         .pDynamicStates = dynamic_states.data(),
@@ -403,6 +409,11 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
             }
         }
         const auto t1 = PocClock::now();
+        if (poc_fragment_only) {
+            // Startup prewarm (PipelineCache::PocPrewarmFragmentLibraries()): library only.
+            MarkDone();
+            return true;
+        }
 
         std::array<vk::PipelineShaderStageCreateInfo, MAX_SHADER_STAGES> vertex_stages;
         u32 vertex_stage_count = 0;
@@ -479,6 +490,9 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
     if (fail_on_compile_required) {
         pipeline_info.flags |= vk::PipelineCreateFlagBits::eFailOnPipelineCompileRequiredEXT;
     }
+    if (instance.IsPocPipelineStatsEnabled()) {
+        pipeline_info.flags |= vk::PipelineCreateFlagBits::eCaptureStatisticsKHR;
+    }
 
     auto result = instance.GetDevice().createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
     if (result.result == vk::Result::eSuccess) {
@@ -489,8 +503,45 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         UNREACHABLE_MSG("Graphics pipeline creation failed!");
     }
 
+    if (instance.IsPocPipelineStatsEnabled()) {
+        PocLogStats();
+    }
     MarkDone();
     return true;
+}
+
+void GraphicsPipeline::PocLogStats() const {
+    const vk::Device device = instance.GetDevice();
+    const auto executables = device.getPipelineExecutablePropertiesKHR({.pipeline = *pipeline});
+    const auto no_spaces = [](const char* text) {
+        std::string out{text};
+        std::replace(out.begin(), out.end(), ' ', '_');
+        return out;
+    };
+    for (u32 i = 0; i < static_cast<u32>(executables.size()); ++i) {
+        const auto stats = device.getPipelineExecutableStatisticsKHR(
+            {.pipeline = *pipeline, .executableIndex = i});
+        std::string line;
+        for (const auto& stat : stats) {
+            const std::string name = no_spaces(stat.name.data());
+            switch (stat.format) {
+            case vk::PipelineExecutableStatisticFormatKHR::eBool32:
+                line += fmt::format(" {}={}", name, stat.value.b32);
+                break;
+            case vk::PipelineExecutableStatisticFormatKHR::eInt64:
+                line += fmt::format(" {}={}", name, stat.value.i64);
+                break;
+            case vk::PipelineExecutableStatisticFormatKHR::eUint64:
+                line += fmt::format(" {}={}", name, stat.value.u64);
+                break;
+            case vk::PipelineExecutableStatisticFormatKHR::eFloat64:
+                line += fmt::format(" {}={:.2f}", name, stat.value.f64);
+                break;
+            }
+        }
+        LOG_INFO(Render_Vulkan, "PoC pipeline stats: uber={} vs={:016x} exec={}{}", poc_uber,
+                 info.state.shader_ids[0], no_spaces(executables[i].name.data()), line);
+    }
 }
 
 GraphicsPipeline::PocWaitState GraphicsPipeline::PocNoteHandoff() noexcept {

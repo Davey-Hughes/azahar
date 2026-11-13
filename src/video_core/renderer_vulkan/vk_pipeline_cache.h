@@ -8,6 +8,7 @@
 #include <bitset>
 #include <memory>
 #include <unordered_set>
+#include <vector>
 
 #include "video_core/rasterizer_interface.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
@@ -94,6 +95,10 @@ public:
     /// Returns true if the pipeline for the bound shaders and @p info is built. Queues the build
     /// like an async BindPipeline() but records nothing.
     bool IsPipelineReady(PipelineInfo& info);
+
+    // PoC GPL: queue the ubershader fragment libraries for the common attachment combinations
+    // (color RGBA8 or none, depth D24S8 or none) at the front of the pipeline workers.
+    void PocPrewarmFragmentLibraries();
 
     // PoC: the pipeline the last IsPipelineReady() call looked up.
     [[nodiscard]] GraphicsPipeline* LastReadyCheck() const noexcept {
@@ -235,6 +240,9 @@ private:
     Pica::Shader::Profile profile{};
     vk::UniquePipelineCache driver_pipeline_cache;
     vk::UniquePipelineLayout pipeline_layout;
+    // PoC GPL prewarm pipelines (fragment library only). Declared before the workers so they
+    // outlive any queued Build().
+    std::vector<std::unique_ptr<GraphicsPipeline>> poc_prewarm_pipelines;
     std::size_t num_worker_threads;
     Common::ThreadWorker pipeline_workers;
     Common::ThreadWorker shader_workers;
