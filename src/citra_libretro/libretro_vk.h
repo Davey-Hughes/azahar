@@ -35,6 +35,11 @@ bool CreateVulkanDevice(struct retro_vulkan_context* context, VkInstance instanc
                         const char** required_device_layers, unsigned num_required_device_layers,
                         const VkPhysicalDeviceFeatures* required_features);
 
+/// Personal build: whether CreateVulkanDevice() enabled these on the device it created.
+bool DeviceHasExtendedDynamicState();
+bool DeviceHasExtendedDynamicState3();
+bool DeviceHasGraphicsPipelineLibrary();
+
 } // namespace LibRetro
 
 namespace Vulkan {

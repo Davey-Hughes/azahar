@@ -21,7 +21,27 @@
 
 static const struct retro_hw_render_interface_vulkan* vulkan_intf;
 
+namespace {
+// Personal build: what CreateVulkanDevice() enabled for the ubershader PoC's dynamic blend
+// and GPL paths. LibRetroVKInstance only sees what the GPU supports, so it checks these.
+bool device_has_eds = false;
+bool device_has_eds3 = false;
+bool device_has_gpl = false;
+} // Anonymous namespace
+
 namespace LibRetro {
+
+bool DeviceHasExtendedDynamicState() {
+    return device_has_eds;
+}
+
+bool DeviceHasExtendedDynamicState3() {
+    return device_has_eds3;
+}
+
+bool DeviceHasGraphicsPipelineLibrary() {
+    return device_has_gpl;
+}
 
 const VkApplicationInfo* GetVulkanApplicationInfo() {
     static VkApplicationInfo app_info{VK_STRUCTURE_TYPE_APPLICATION_INFO};
@@ -101,6 +121,64 @@ bool CreateVulkanDevice(struct retro_vulkan_context* context, VkInstance instanc
     const bool has_custom_border_color = AddExtensionIfAvailable(
         enabled_exts, available_exts, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
 
+    // Personal build: the ubershader PoC's dynamic blend needs EDS3, and its GPL fast-link
+    // needs EDS1, EDS3 and the pipeline library extensions. Instance::CreateDevice() decides
+    // whether to use them.
+    const bool has_eds = AddExtensionIfAvailable(enabled_exts, available_exts,
+                                                 VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
+    const bool has_eds3 = AddExtensionIfAvailable(enabled_exts, available_exts,
+                                                  VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
+    const bool has_gpl =
+        AddExtensionIfAvailable(enabled_exts, available_exts,
+                                VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+        AddExtensionIfAvailable(enabled_exts, available_exts,
+                                VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT eds_supported{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT};
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT eds3_supported{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gpl_supported{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
+    {
+        // Only chain the structs of extensions the device has.
+        void* chain = nullptr;
+        if (has_eds) {
+            eds_supported.pNext = chain;
+            chain = &eds_supported;
+        }
+        if (has_eds3) {
+            eds3_supported.pNext = chain;
+            chain = &eds3_supported;
+        }
+        if (has_gpl) {
+            gpl_supported.pNext = chain;
+            chain = &gpl_supported;
+        }
+        auto vkGetPhysicalDeviceFeatures2 = (PFN_vkGetPhysicalDeviceFeatures2)get_instance_proc_addr(
+            instance, "vkGetPhysicalDeviceFeatures2");
+        if (!vkGetPhysicalDeviceFeatures2) {
+            vkGetPhysicalDeviceFeatures2 = (PFN_vkGetPhysicalDeviceFeatures2)get_instance_proc_addr(
+                instance, "vkGetPhysicalDeviceFeatures2KHR");
+        }
+        if (chain && vkGetPhysicalDeviceFeatures2) {
+            VkPhysicalDeviceFeatures2 query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+            query.pNext = chain;
+            vkGetPhysicalDeviceFeatures2(gpu, &query);
+        } else {
+            // Leave every feature off; LibRetroVKInstance then turns the paths off too.
+            eds_supported = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT};
+            eds3_supported = {
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
+            gpl_supported = {
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
+        }
+    }
+    device_has_eds = has_eds && eds_supported.extendedDynamicState;
+    device_has_eds3 = has_eds3 && eds3_supported.extendedDynamicState3ColorBlendEquation &&
+                      eds3_supported.extendedDynamicState3ColorWriteMask;
+    device_has_gpl = has_gpl && gpl_supported.graphicsPipelineLibrary;
+
     // These are beneficial but blacklisted on some platforms due to driver bugs
     // For now, let the Instance class handle these decisions
     // AddExtensionIfAvailable(enabled_exts, available_exts,
@@ -179,6 +257,32 @@ bool CreateVulkanDevice(struct retro_vulkan_context* context, VkInstance instanc
         custom_border_color_features.pNext = enabled_features.pNext;
         enabled_features.pNext = &custom_border_color_features;
     }
+
+    // Personal build: the features Instance::CreateDevice() turns on for the PoC.
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT eds_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT};
+    if (device_has_eds) {
+        eds_features.extendedDynamicState = VK_TRUE;
+        eds_features.pNext = enabled_features.pNext;
+        enabled_features.pNext = &eds_features;
+    }
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT eds3_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
+    if (device_has_eds3) {
+        eds3_features.extendedDynamicState3ColorBlendEquation = VK_TRUE;
+        eds3_features.extendedDynamicState3ColorWriteMask = VK_TRUE;
+        eds3_features.pNext = enabled_features.pNext;
+        enabled_features.pNext = &eds3_features;
+    }
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gpl_features{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
+    if (device_has_gpl) {
+        gpl_features.graphicsPipelineLibrary = VK_TRUE;
+        gpl_features.pNext = enabled_features.pNext;
+        enabled_features.pNext = &gpl_features;
+    }
+    LOG_INFO(Render_Vulkan, "Personal build device features: EDS {}, EDS3 blend {}, GPL {}",
+             device_has_eds, device_has_eds3, device_has_gpl);
 
     VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     device_info.queueCreateInfoCount = 1;
@@ -326,6 +430,29 @@ LibRetroVKInstance::LibRetroVKInstance(Frontend::EmuWindow& window,
             timeline_semaphores = false;
         }
     }
+
+    // Personal build: CreateDevice() decided from what the GPU supports, but the frontend's
+    // device only has what LibRetro::CreateVulkanDevice() enabled.
+    if (extended_dynamic_state && !LibRetro::DeviceHasExtendedDynamicState()) {
+        LOG_WARNING(Render_Vulkan, "Extended dynamic state not enabled on the device, disabling");
+        extended_dynamic_state = false;
+    }
+    if (extended_dynamic_state3 &&
+        (!LibRetro::DeviceHasExtendedDynamicState3() ||
+         !VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdSetColorBlendEquationEXT ||
+         !VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdSetColorWriteMaskEXT)) {
+        LOG_WARNING(Render_Vulkan, "EDS3 dynamic blend not enabled on the device, disabling");
+        extended_dynamic_state3 = false;
+    }
+    if ((poc_uber_gpl || poc_spec_gpl) &&
+        (!LibRetro::DeviceHasGraphicsPipelineLibrary() || !extended_dynamic_state ||
+         !extended_dynamic_state3)) {
+        LOG_WARNING(Render_Vulkan, "GPL not usable on the device, disabling");
+        poc_uber_gpl = false;
+        poc_spec_gpl = false;
+    }
+    LOG_INFO(Render_Vulkan, "Personal build: EDS {}, EDS3 blend {}, GPL ubershader {}, GPL specialized {}",
+             extended_dynamic_state, extended_dynamic_state3, poc_uber_gpl, poc_spec_gpl);
 
     // Initialize subsystems
     CreateAllocator();
