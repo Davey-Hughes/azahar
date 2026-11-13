@@ -254,13 +254,22 @@ static std::string GetPocProperty(const std::string& prop) {
 
 static void ImportPocTogglesFromProperties() {
     static constexpr std::array names{
-        "AZAHAR_PIPELINE_WORKERS",       "AZAHAR_UBER_FIRST",
-        "AZAHAR_SLOW_FRAME_MS",          "AZAHAR_UBERSHADER_FORCE",
-        "AZAHAR_UBERSHADER_SMALL_DRAWS", "AZAHAR_GPU_DRAW_TIMING",
-        "AZAHAR_OLD_FILL_GUARD",         "AZAHAR_UBER_GPL",
-        "AZAHAR_PIPELINE_STATS",         "AZAHAR_IR3_SHADER_DEBUG",
-        "AZAHAR_SPEC_GPL",               "AZAHAR_BUILD_ON_WAIT",
-        "AZAHAR_VS_SPECIALIZE_BOOLS",    "AZAHAR_SKIP_UNREADY_FALLBACK",
+        "AZAHAR_PIPELINE_WORKERS",
+        "AZAHAR_UBER_FIRST",
+        "AZAHAR_SLOW_FRAME_MS",
+        "AZAHAR_UBERSHADER_FORCE",
+        "AZAHAR_UBERSHADER_SMALL_DRAWS",
+        "AZAHAR_GPU_DRAW_TIMING",
+        "AZAHAR_OLD_FILL_GUARD",
+        "AZAHAR_UBER_GPL",
+        "AZAHAR_PIPELINE_STATS",
+        "AZAHAR_IR3_SHADER_DEBUG",
+        "AZAHAR_SPEC_GPL",
+        "AZAHAR_BUILD_ON_WAIT",
+        "AZAHAR_VS_SPECIALIZE_BOOLS",
+        "AZAHAR_SKIP_UNREADY_FALLBACK",
+        "AZAHAR_GPL_PARK",
+        "AZAHAR_PREWARM_RGB565",
     };
     for (const char* name : names) {
         const std::string prop = "debug." + Common::ToLower(name);

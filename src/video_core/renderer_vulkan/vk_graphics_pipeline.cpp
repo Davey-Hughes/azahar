@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 
 #include <boost/container/static_vector.hpp>
 
@@ -23,6 +24,32 @@
 namespace Vulkan {
 
 MICROPROFILE_DEFINE(Vulkan_Pipeline, "Vulkan", "Pipeline Building", MP_RGB(0, 192, 32));
+
+namespace {
+// PoC: set while a pipeline worker runs GraphicsPipeline::PocRunBuildTask(), and when that
+// build parked itself on a busy GPL library.
+thread_local bool t_poc_worker_build = false;
+thread_local bool t_poc_parked = false;
+
+bool PocEnvFlag(const char* name) {
+    const char* const env = std::getenv(name);
+    return env && std::string_view{env} == "1";
+}
+
+// AZAHAR_GPL_PARK=1: a pipeline worker that needs a GPL library another thread is building
+// hands its build back instead of blocking (GraphicsPipeline::PocLockLibrary()).
+bool PocParkEnabled() {
+    static const bool enabled = PocEnvFlag("AZAHAR_GPL_PARK");
+    return enabled;
+}
+} // Anonymous namespace
+
+// AZAHAR_PREWARM_RGB565=1: fragment libraries ignore the logic op while blending is enabled
+// (logicOpEnable is false then), and the startup prewarm also builds RGB565.
+bool PocPrewarmRgb565Enabled() {
+    static const bool enabled = PocEnvFlag("AZAHAR_PREWARM_RGB565");
+    return enabled;
+}
 
 vk::ShaderStageFlagBits MakeShaderStage(std::size_t index) {
     switch (index) {
@@ -192,8 +219,60 @@ void GraphicsPipeline::PocRunBuildTask() {
     ApplyCompileWorkerNice();
     const auto start = PocClock::now();
     poc_started.store(true, std::memory_order_relaxed);
+    t_poc_worker_build = true;
     Build();
+    t_poc_worker_build = false;
+    if (std::exchange(t_poc_parked, false)) {
+        // PocUnlockLibrary() re-queues it; don't touch `this` after parking.
+        return;
+    }
     PocLogBuild(start, PocClock::now(), false);
+}
+
+void GraphicsPipeline::PocRequeue() {
+    poc_started.store(false, std::memory_order_relaxed);
+    poc_build_claimed.store(false, std::memory_order_release);
+    if (priority) {
+        worker->QueuePriorityWork([this] { PocRunBuildTask(); });
+    } else {
+        worker->QueueWork([this] { PocRunBuildTask(); });
+    }
+}
+
+GraphicsPipeline::PocLock GraphicsPipeline::PocLockLibrary(PocLibrary& library, bool try_only) {
+    if (library.mutex.try_lock()) {
+        return PocLock::Acquired;
+    }
+    if (try_only) {
+        return PocLock::Busy;
+    }
+    if (!t_poc_worker_build || !PocParkEnabled()) {
+        library.mutex.lock();
+        return PocLock::Acquired;
+    }
+    // Another thread is building this library, which takes seconds for an ubershader on Turnip.
+    // Free the worker instead: whoever unlocks the library re-queues this build. Trying again
+    // under waiters_mutex closes the race with an unlock that ran in between.
+    std::scoped_lock waiters_lock{library.waiters_mutex};
+    if (library.mutex.try_lock()) {
+        return PocLock::Acquired;
+    }
+    poc_parks.fetch_add(1, std::memory_order_relaxed);
+    library.waiters.push_back(this);
+    t_poc_parked = true;
+    return PocLock::Parked;
+}
+
+void GraphicsPipeline::PocUnlockLibrary(PocLibrary& library) {
+    std::vector<GraphicsPipeline*> waiters;
+    {
+        std::scoped_lock waiters_lock{library.waiters_mutex};
+        library.mutex.unlock();
+        waiters.swap(library.waiters);
+    }
+    for (GraphicsPipeline* const waiter : waiters) {
+        waiter->PocRequeue();
+    }
 }
 
 void GraphicsPipeline::PocBuildIfUnclaimed() {
@@ -385,22 +464,25 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
 
         // Everything the fragment library bakes in. Depth/stencil, blend equations and the
         // color write mask are dynamic (IsPocUberGplEnabled() requires EDS and EDS3).
+        const bool logic_op_ignored = blending.blend_enable && PocPrewarmRgb565Enabled();
         const u64 fragment_key = Common::HashCombine(
             reinterpret_cast<u64>(static_cast<VkShaderModule>(stages[1]->Handle())),
             Common::ComputeStructHash64(info.state.attachments),
-            static_cast<u64>(blending.blend_enable), static_cast<u64>(blending.logic_op));
+            static_cast<u64>(blending.blend_enable),
+            logic_op_ignored ? u64{0} : static_cast<u64>(blending.logic_op));
         PocLibrary& fragment = PocGetLibrary(fragment_key);
         {
             // On the emu-thread attempt, don't wait for another thread's fragment build, and
             // only take a fragment library the driver can return without compiling.
-            std::unique_lock lock{fragment.mutex, std::defer_lock};
-            if (fail_on_compile_required) {
-                if (!lock.try_lock()) {
-                    return false;
-                }
-            } else {
-                lock.lock();
+            if (PocLockLibrary(fragment, fail_on_compile_required) != PocLock::Acquired) {
+                return false;
             }
+            struct Unlock {
+                PocLibrary& library;
+                ~Unlock() {
+                    PocUnlockLibrary(library);
+                }
+            } const unlock{fragment};
             if (!fragment.pipeline) {
                 const auto f0 = PocClock::now();
                 const vk::GraphicsPipelineLibraryCreateInfoEXT library_info = {
@@ -505,14 +587,15 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
             static_cast<u64>(input_assembly.topology));
         PocLibrary& vertex = PocGetLibrary(vertex_key);
         {
-            std::unique_lock lock{vertex.mutex, std::defer_lock};
-            if (fail_on_compile_required) {
-                if (!lock.try_lock()) {
-                    return false;
-                }
-            } else {
-                lock.lock();
+            if (PocLockLibrary(vertex, fail_on_compile_required) != PocLock::Acquired) {
+                return false;
             }
+            struct Unlock {
+                PocLibrary& library;
+                ~Unlock() {
+                    PocUnlockLibrary(library);
+                }
+            } const unlock{vertex};
             if (!vertex.pipeline) {
                 const auto v0 = PocClock::now();
                 auto vertex_result = device.createGraphicsPipeline(pipeline_cache, vertex_info);
@@ -656,19 +739,19 @@ void GraphicsPipeline::PocLogBuild(PocClock::time_point start, PocClock::time_po
                                    bool fast) const {
     using Ms = std::chrono::duration<double, std::milli>;
     const auto& state = info.state;
-    LOG_INFO(Render_Vulkan,
-             "PoC pipeline built: uber={} fast={} vs={:016x} wait_shaders_ms={:.0f} "
-             "queued_ms={:.0f} build_ms={:.1f} handoffs={} gpl_frag_ms={:.0f} gpl_vert_ms={:.1f} "
-             "gpl_link_ms={:.1f} layout={:016x} color={} depth={} samples={} blend={} "
-             "logic_op={} gs={:016x} on_wait={}",
-             poc_uber, fast, state.shader_ids[0], Ms(poc_queued - poc_created).count(),
-             Ms(start - poc_queued).count(), Ms(end - start).count(),
-             poc_handoffs.load(std::memory_order_relaxed), poc_gpl_ms[0], poc_gpl_ms[1],
-             poc_gpl_ms[2], Common::ComputeStructHash64(state.vertex_layout),
-             static_cast<u32>(state.attachments.color), static_cast<u32>(state.attachments.depth),
-             state.attachments.sample_count, state.blending.blend_enable,
-             static_cast<u32>(state.blending.logic_op), state.shader_ids[2],
-             poc_wait_mode.load(std::memory_order_relaxed));
+    LOG_INFO(
+        Render_Vulkan,
+        "PoC pipeline built: uber={} fast={} vs={:016x} wait_shaders_ms={:.0f} "
+        "queued_ms={:.0f} build_ms={:.1f} handoffs={} gpl_frag_ms={:.0f} gpl_vert_ms={:.1f} "
+        "gpl_link_ms={:.1f} layout={:016x} color={} depth={} samples={} blend={} "
+        "logic_op={} gs={:016x} on_wait={} parks={}",
+        poc_uber, fast, state.shader_ids[0], Ms(poc_queued - poc_created).count(),
+        Ms(start - poc_queued).count(), Ms(end - start).count(),
+        poc_handoffs.load(std::memory_order_relaxed), poc_gpl_ms[0], poc_gpl_ms[1], poc_gpl_ms[2],
+        Common::ComputeStructHash64(state.vertex_layout), static_cast<u32>(state.attachments.color),
+        static_cast<u32>(state.attachments.depth), state.attachments.sample_count,
+        state.blending.blend_enable, static_cast<u32>(state.blending.logic_op), state.shader_ids[2],
+        poc_wait_mode.load(std::memory_order_relaxed), poc_parks.load(std::memory_order_relaxed));
 }
 
 } // namespace Vulkan

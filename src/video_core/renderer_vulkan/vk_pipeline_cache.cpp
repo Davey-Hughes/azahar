@@ -218,12 +218,17 @@ void PipelineCache::PocPrewarmFragmentLibraries() {
     // In order of first use in lm2. One task builds them one after another: four ubershader
     // compiles in parallel took 4-5 s each on the Thor, versus 2.1 s for one alone.
     using VideoCore::PixelFormat;
-    static constexpr std::array<std::pair<PixelFormat, PixelFormat>, 4> attachments{{
+    std::vector<std::pair<PixelFormat, PixelFormat>> attachments{
         {PixelFormat::RGBA8, PixelFormat::Invalid},
         {PixelFormat::RGBA8, PixelFormat::D24S8},
         {PixelFormat::Invalid, PixelFormat::D24S8},
         {PixelFormat::Invalid, PixelFormat::Invalid},
-    }};
+    };
+    if (PocPrewarmRgb565Enabled()) {
+        // albw's first ubershader draws go to RGB565.
+        attachments.emplace_back(PixelFormat::RGB565, PixelFormat::Invalid);
+        attachments.emplace_back(PixelFormat::RGB565, PixelFormat::D24S8);
+    }
     for (const auto& [color, depth] : attachments) {
         PipelineInfo info{};
         info.state.attachments.color = color;

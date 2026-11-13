@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <vector>
 
 #include "common/hash.h"
 #include "common/thread_worker.h"
@@ -322,6 +323,9 @@ struct Shader : public Common::AsyncHandle {
     std::string program;
 };
 
+// PoC (AZAHAR_PREWARM_RGB565=1), see vk_graphics_pipeline.cpp.
+bool PocPrewarmRgb565Enabled();
+
 class GraphicsPipeline : public Common::AsyncHandle {
 public:
     explicit GraphicsPipeline(const Instance& instance, RenderManager& renderpass_cache,
@@ -368,8 +372,18 @@ private:
     struct PocLibrary {
         std::mutex mutex;
         vk::Pipeline pipeline{};
+        // AZAHAR_GPL_PARK=1: pipelines whose worker found `mutex` held by another thread.
+        // PocUnlockLibrary() re-queues them.
+        std::mutex waiters_mutex;
+        std::vector<GraphicsPipeline*> waiters;
     };
     static PocLibrary& PocGetLibrary(u64 key);
+    enum class PocLock : u8 { Acquired, Busy, Parked };
+    PocLock PocLockLibrary(PocLibrary& library, bool try_only);
+    static void PocUnlockLibrary(PocLibrary& library);
+    void PocRequeue();
+    // Times this pipeline's build parked on a busy library.
+    std::atomic<u32> poc_parks{};
     // Fragment library (get or build), vertex library, link; ms. Zero when not built with GPL.
     std::array<double, 3> poc_gpl_ms{};
 
