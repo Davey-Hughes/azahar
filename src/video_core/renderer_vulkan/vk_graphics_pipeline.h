@@ -6,7 +6,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <mutex>
+#include <unordered_map>
 
 #include "common/hash.h"
 #include "common/thread_worker.h"
@@ -353,6 +355,9 @@ public:
     enum class PocWaitState : u8 { VsPending, FsPending, GsPending, Queued, Building, Count };
     PocWaitState PocNoteHandoff() noexcept;
 
+    // PoC GPL: destroys every shared vertex and fragment library and empties the map.
+    static void PocDestroyLibraries(vk::Device device);
+
     [[nodiscard]] vk::Pipeline Handle() const noexcept {
         return *pipeline;
     }
@@ -362,13 +367,17 @@ private:
     void PocLogBuild(PocClock::time_point start, PocClock::time_point end, bool fast) const;
     void PocLogStats() const;
 
-    // PoC GPL: one fragment library per fragment state, shared across pipelines and threads.
-    struct PocFragmentLibrary {
+    // PoC GPL: vertex and fragment libraries, each shared across pipelines and threads by key.
+    struct PocLibrary {
         std::mutex mutex;
         vk::Pipeline pipeline{};
     };
-    static PocFragmentLibrary& PocGetFragmentLibrary(u64 key);
-    vk::UniquePipeline poc_vertex_library;
+    struct PocLibraryMap {
+        std::mutex mutex;
+        std::unordered_map<u64, std::unique_ptr<PocLibrary>> libraries;
+    };
+    static PocLibraryMap& PocLibraries();
+    static PocLibrary& PocGetLibrary(u64 key);
     // Fragment library (get or build), vertex library, link; ms. Zero when not built with GPL.
     std::array<double, 3> poc_gpl_ms{};
 

@@ -233,6 +233,14 @@ private:
 
 private:
     const Instance& instance;
+    // PoC GPL: declared first so it runs last, after the workers have joined and every pipeline
+    // linked from the shared libraries is gone (GraphicsPipeline::PocDestroyLibraries()).
+    struct PocLibraryReset {
+        vk::Device device;
+        ~PocLibraryReset() {
+            GraphicsPipeline::PocDestroyLibraries(device);
+        }
+    } poc_library_reset;
     Scheduler& scheduler;
     RenderManager& renderpass_cache;
     DescriptorUpdateQueue& update_queue;

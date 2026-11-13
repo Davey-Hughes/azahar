@@ -119,7 +119,8 @@ static bool UberFirstFront() {
 
 PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                              RenderManager& renderpass_cache_, DescriptorUpdateQueue& update_queue_)
-    : instance{instance_}, scheduler{scheduler_}, renderpass_cache{renderpass_cache_},
+    : instance{instance_}, poc_library_reset{instance_.GetDevice()}, scheduler{scheduler_},
+      renderpass_cache{renderpass_cache_},
       update_queue{update_queue_},
       num_worker_threads{PipelineWorkerCount()},
       pipeline_workers{num_worker_threads, "Pipeline workers"},

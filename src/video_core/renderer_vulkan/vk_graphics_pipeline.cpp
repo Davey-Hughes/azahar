@@ -330,7 +330,7 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         renderpass_cache.GetRenderpass(info.state.attachments.color, info.state.attachments.depth,
                                        false, info.state.attachments.sample_count);
 
-    if (poc_uber && instance.IsPocUberGplEnabled()) {
+    if (instance.IsPocUberGplEnabled() && (poc_uber || instance.IsPocSpecGplEnabled())) {
         // PoC: the ubershader FS is the expensive part and the same for every ubershader
         // pipeline, so build it once per fragment state as a library and fast-link it with a
         // per-pipeline vertex library. The vertex library still compiles the game's VS.
@@ -346,7 +346,7 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
             reinterpret_cast<u64>(static_cast<VkShaderModule>(stages[1]->Handle())),
             Common::ComputeStructHash64(info.state.attachments),
             static_cast<u64>(blending.blend_enable), static_cast<u64>(blending.logic_op));
-        PocFragmentLibrary& fragment = PocGetFragmentLibrary(fragment_key);
+        PocLibrary& fragment = PocGetLibrary(fragment_key);
         {
             // On the emu-thread attempt, don't wait for another thread's fragment build, and
             // only take a fragment library the driver can return without compiling.
@@ -446,16 +446,52 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         if (fail_on_compile_required) {
             vertex_info.flags |= vk::PipelineCreateFlagBits::eFailOnPipelineCompileRequiredEXT;
         }
-        auto vertex_result = device.createGraphicsPipelineUnique(pipeline_cache, vertex_info);
-        if (vertex_result.result == vk::Result::eErrorPipelineCompileRequiredEXT) {
-            return false;
+
+        // The vertex library is shared by every pipeline (ubershader or specialized) with the
+        // same VS, GS, vertex layout, attachments and topology. Cull mode, front face and the
+        // topology itself are dynamic (EDS), so only the topology class matters; keeping the
+        // topology in the key is conservative.
+        const auto module_key = [](Shader* shader) {
+            return shader ? reinterpret_cast<u64>(static_cast<VkShaderModule>(shader->Handle()))
+                          : u64{0};
+        };
+        const u64 vertex_key = Common::HashCombine(
+            u64{0x56455254}, module_key(stages[0]), module_key(stages[2]),
+            Common::ComputeStructHash64(info.state.vertex_layout),
+            Common::ComputeStructHash64(info.state.attachments),
+            static_cast<u64>(input_assembly.topology));
+        PocLibrary& vertex = PocGetLibrary(vertex_key);
+        {
+            std::unique_lock lock{vertex.mutex, std::defer_lock};
+            if (fail_on_compile_required) {
+                if (!lock.try_lock()) {
+                    return false;
+                }
+            } else {
+                lock.lock();
+            }
+            if (!vertex.pipeline) {
+                const auto v0 = PocClock::now();
+                auto vertex_result = device.createGraphicsPipeline(pipeline_cache, vertex_info);
+                if (vertex_result.result == vk::Result::eErrorPipelineCompileRequiredEXT) {
+                    return false;
+                }
+                ASSERT_MSG(vertex_result.result == vk::Result::eSuccess,
+                           "PoC GPL vertex library creation failed");
+                // Never destroyed, like the fragment libraries.
+                vertex.pipeline = vertex_result.value;
+                LOG_INFO(Render_Vulkan,
+                         "PoC GPL vertex library: key={:016x} vs={:016x} gs={:016x} "
+                         "color={} depth={} ms={:.1f}",
+                         vertex_key, info.state.shader_ids[0], info.state.shader_ids[2],
+                         static_cast<u32>(info.state.attachments.color),
+                         static_cast<u32>(info.state.attachments.depth),
+                         Ms(PocClock::now() - v0).count());
+            }
         }
-        ASSERT_MSG(vertex_result.result == vk::Result::eSuccess,
-                   "PoC GPL vertex library creation failed");
-        poc_vertex_library = std::move(vertex_result.value);
         const auto t2 = PocClock::now();
 
-        const std::array libraries{*poc_vertex_library, fragment.pipeline};
+        const std::array libraries{vertex.pipeline, fragment.pipeline};
         const vk::PipelineLibraryCreateInfoKHR link_info = {
             .libraryCount = static_cast<u32>(libraries.size()),
             .pLibraries = libraries.data(),
@@ -561,16 +597,35 @@ GraphicsPipeline::PocWaitState GraphicsPipeline::PocNoteHandoff() noexcept {
     return PocWaitState::Queued;
 }
 
-GraphicsPipeline::PocFragmentLibrary& GraphicsPipeline::PocGetFragmentLibrary(u64 key) {
-    // Leaked on purpose (PoC): the libraries live as long as the process.
-    static std::mutex map_mutex;
-    static std::unordered_map<u64, std::unique_ptr<PocFragmentLibrary>> libraries;
-    std::scoped_lock lock{map_mutex};
-    auto& entry = libraries[key];
+GraphicsPipeline::PocLibraryMap& GraphicsPipeline::PocLibraries() {
+    // Lives until PipelineCache::~PipelineCache() empties it (PocDestroyLibraries()).
+    static PocLibraryMap map;
+    return map;
+}
+
+GraphicsPipeline::PocLibrary& GraphicsPipeline::PocGetLibrary(u64 key) {
+    auto& map = PocLibraries();
+    std::scoped_lock lock{map.mutex};
+    auto& entry = map.libraries[key];
     if (!entry) {
-        entry = std::make_unique<PocFragmentLibrary>();
+        entry = std::make_unique<PocLibrary>();
     }
     return *entry;
+}
+
+void GraphicsPipeline::PocDestroyLibraries(vk::Device device) {
+    // The keys hold shader module handles, and a state load rebuilds the renderer (and on
+    // standalone builds the device), so new modules can reuse old handles. A library kept past
+    // its renderer links another shader's code into the new pipeline.
+    auto& map = PocLibraries();
+    std::scoped_lock lock{map.mutex};
+    for (auto& [key, library] : map.libraries) {
+        if (library->pipeline) {
+            device.destroyPipeline(library->pipeline);
+        }
+    }
+    LOG_INFO(Render_Vulkan, "PoC GPL: destroyed {} libraries", map.libraries.size());
+    map.libraries.clear();
 }
 
 void GraphicsPipeline::PocLogBuild(PocClock::time_point start, PocClock::time_point end,

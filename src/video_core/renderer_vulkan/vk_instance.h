@@ -184,6 +184,12 @@ public:
         return poc_uber_gpl;
     }
 
+    /// PoC (AZAHAR_SPEC_GPL=1, needs AZAHAR_UBER_GPL=1): specialized pipelines use the same
+    /// shared vertex and fragment libraries.
+    bool IsPocSpecGplEnabled() const {
+        return poc_spec_gpl;
+    }
+
     /// PoC (AZAHAR_PIPELINE_STATS=1): capture and log per-stage pipeline statistics.
     bool IsPocPipelineStatsEnabled() const {
         return poc_pipeline_stats;
@@ -366,6 +372,7 @@ protected:
     bool depth_stencil_resolve{};
     bool pipeline_creation_cache_control{};
     bool poc_uber_gpl{};
+    bool poc_spec_gpl{};
     bool poc_pipeline_stats{};
     bool fragment_shader_barycentric{};
     bool shader_stencil_export{};
