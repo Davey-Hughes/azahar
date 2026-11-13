@@ -1130,7 +1130,10 @@ static void ParseGraphicsOptions(void) {
         SetPocSwitch("AZAHAR_SPEC_GPL", gpl);
         SetPocSwitch("AZAHAR_GPL_PARK", gpl);
         SetPocSwitch("AZAHAR_SKIP_UNREADY_FALLBACK", true);
-        SetPocSwitch("AZAHAR_VS_SPECIALIZE_BOOLS", true);
+        // The branch carries upstream PR #2813, which specializes vertex shaders on the bool
+        // uniforms through PicaVSConfigState, so the disk cache can preload them. The PoC's
+        // version keys them differently from what the cache stores; keep it off.
+        SetPocSwitch("AZAHAR_VS_SPECIALIZE_BOOLS", false);
     }
 
     auto resolution = LibRetro::FetchVariable(config::graphics::resolution_factor, "1");
