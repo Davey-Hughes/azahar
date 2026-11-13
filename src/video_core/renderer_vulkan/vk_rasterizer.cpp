@@ -361,7 +361,11 @@ void RasterizerVulkan::SyncDrawState() {
     pipeline_info.dynamic_info.blend_color = regs.framebuffer.output_merger.blend_const.raw;
     // SyncLogicOp();
     // SyncColorWriteMask();
+    // Blending disables the logic op, so keep it out of the pipeline key.
     pipeline_info.state.blending.logic_op = regs.framebuffer.output_merger.logic_op;
+    if (pipeline_info.state.blending.blend_enable) {
+        pipeline_info.state.blending.logic_op = Pica::FramebufferRegs::LogicOp::Copy;
+    }
 
     const u32 color_mask = regs.framebuffer.framebuffer.allow_color_write != 0
                                ? (regs.framebuffer.output_merger.depth_color_mask >> 8) & 0xF
