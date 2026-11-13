@@ -2,6 +2,9 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <cstdlib>
+#include <fstream>
+
 #include "common/common_paths.h"
 #include "common/file_util.h"
 #include "common/scm_rev.h"
@@ -121,6 +124,17 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseProgrammableVer
         if (new_program) {
             LOG_NEW_OBJECT(Render_Vulkan, "New VS SPIRV {:016X}", spirv_id);
 
+            // PoC: AZAHAR_DUMP_VS=<dir> writes each new vertex shader's GLSL there.
+            if (const char* dump_dir = std::getenv("AZAHAR_DUMP_VS")) {
+                std::ofstream{fmt::format("{}/vs_{:016x}.vert", dump_dir, spirv_id)}
+                    << program.value;
+            }
+        }
+        if (std::getenv("AZAHAR_DUMP_VS")) {
+            LOG_INFO(Render_Vulkan, "PoC VS dump: config={:016x} spirv={:016x}", config_hash,
+                     spirv_id);
+        }
+        if (new_program) {
             shader.program = std::move(program);
             const vk::Device device = parent.instance.GetDevice();
             const auto poc_queued = std::chrono::steady_clock::now();

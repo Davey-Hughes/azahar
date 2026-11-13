@@ -5,6 +5,8 @@
 #pragma once
 
 #include <chrono>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "video_core/rasterizer_accelerated.h"
 #include "video_core/renderer_vulkan/vk_descriptor_update_queue.h"
@@ -107,6 +109,8 @@ private:
 
     /// Internal implementation for AccelerateDrawBatch
     bool AccelerateDrawBatchInternal(bool is_indexed, bool force_wait);
+    void PocNoteVsBools();
+    std::unordered_map<u64, std::unordered_set<u32>> poc_vs_bools;
 
     /// Setup index array for AccelerateDrawBatch
     void SetupIndexArray();
