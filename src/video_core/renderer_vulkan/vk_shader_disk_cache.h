@@ -133,7 +133,7 @@ private:
 
         Pica::Shader::FSConfig fs_config;
     };
-    static_assert(sizeof(FSConfigEntry) == 280);
+    static_assert(sizeof(FSConfigEntry) == 256);
 
     struct GSConfigEntry {
         static constexpr u8 EXPECTED_VERSION = 0;

@@ -48,6 +48,8 @@ struct BlendConfig {
         // If we don't need min/max emulation, set the blend equation
         // to "-1" as a clear marker that this config is disabled.
         eq = static_cast<Pica::FramebufferRegs::BlendEquation>(UINT32_MAX);
+        src_factor = {};
+        dst_factor = {};
     }
 
     bool RequiresMinMaxEmulation() const {
@@ -77,8 +79,6 @@ struct FramebufferConfig {
     BlendConfig requested_rgb_blend{};
     BlendConfig requested_alpha_blend{};
 
-    Pica::FramebufferRegs::LogicOp requested_logic_op{};
-
     void ApplyProfile(const Profile& profile);
 
     static consteval u64 StructHash() {
@@ -95,7 +95,6 @@ struct FramebufferConfig {
             FIELD_HASH(alpha_test_func), FIELD_HASH(scissor_test_mode), FIELD_HASH(depthmap_enable),
             FIELD_HASH(logic_op), FIELD_HASH(shadow_rendering), FIELD_HASH(alphablend_enable),
             FIELD_HASH(requested_rgb_blend), FIELD_HASH(requested_alpha_blend),
-            FIELD_HASH(requested_logic_op),
 
             // nested layout
             BlendConfig::StructHash());
@@ -172,25 +171,6 @@ struct TextureConfig {
     std::array<TextureBorder, 3> texture_border_color{};
     std::array<TevStageConfigRaw, 6> tev_stages{};
 
-    struct TextureWrap {
-        Pica::TexturingRegs::TextureConfig::WrapMode s;
-        Pica::TexturingRegs::TextureConfig::WrapMode t;
-
-        static consteval u64 StructHash() {
-            constexpr u64 STRUCT_VERSION = 0;
-
-            using T = TextureWrap;
-            return Common::HashCombine(STRUCT_VERSION,
-
-                                       // layout
-                                       LAYOUT_HASH,
-
-                                       // fields
-                                       FIELD_HASH(s), FIELD_HASH(t));
-        }
-    };
-    std::array<TextureWrap, 3> requested_wrap{};
-
     void ApplyProfile(const Profile& profile);
 
     static consteval u64 StructHash() {
@@ -207,11 +187,9 @@ struct TextureConfig {
                                    FIELD_HASH(combiner_buffer_input), FIELD_HASH(fog_mode),
                                    FIELD_HASH(fog_flip), FIELD_HASH(shadow_texture_orthographic),
                                    FIELD_HASH(texture_border_color), FIELD_HASH(tev_stages),
-                                   FIELD_HASH(requested_wrap),
 
                                    // nested layout
-                                   TextureBorder::StructHash(), TevStageConfigRaw::StructHash(),
-                                   TextureWrap::StructHash());
+                                   TextureBorder::StructHash(), TevStageConfigRaw::StructHash());
     }
 };
 static_assert(std::has_unique_object_representations_v<TextureConfig>);
@@ -394,7 +372,8 @@ union UserConfig {
 static_assert(std::has_unique_object_representations_v<UserConfig>);
 
 struct FSConfig {
-    explicit FSConfig(const Pica::RegsInternal& regs);
+    // Applies the profile, so draws that generate the same shader share a key.
+    explicit FSConfig(const Pica::RegsInternal& regs, const Profile& profile);
 
     [[nodiscard]] bool TevStageUpdatesCombinerBufferColor(u32 stage_index) const {
         return (stage_index < 4) && (texture.combiner_buffer_input & (1 << stage_index));

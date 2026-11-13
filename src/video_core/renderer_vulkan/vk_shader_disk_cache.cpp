@@ -204,7 +204,7 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseProgrammableVer
 std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseFragmentShader(
     const Pica::RegsInternal& regs, const Pica::Shader::UserConfig& user) {
 
-    const FSConfig fs_config{regs};
+    const FSConfig fs_config{regs, parent.profile};
     const auto fs_config_hash = fs_config.Hash();
     const auto [it, new_shader] = fragment_shaders.try_emplace(fs_config_hash, parent.instance);
     auto& shader = it->second;

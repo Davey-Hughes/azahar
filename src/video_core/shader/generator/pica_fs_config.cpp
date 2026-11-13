@@ -16,9 +16,8 @@ FramebufferConfig::FramebufferConfig(const Pica::RegsInternal& regs) {
                                : Pica::FramebufferRegs::CompareFunc::Always);
 
     alphablend_enable.Assign(output_merger.alphablend_enable);
-    requested_logic_op = output_merger.logic_op;
-
-    logic_op.Assign(Pica::FramebufferRegs::LogicOp::Copy);
+    logic_op.Assign(alphablend_enable ? Pica::FramebufferRegs::LogicOp::Copy
+                                      : output_merger.logic_op.Value());
 
     if (alphablend_enable) {
         requested_rgb_blend.eq = output_merger.alpha_blending.blend_equation_rgb.Value();
@@ -33,8 +32,8 @@ FramebufferConfig::FramebufferConfig(const Pica::RegsInternal& regs) {
 
 void FramebufferConfig::ApplyProfile(const Profile& profile) {
     // Emulate logic op in the shader if needed and not supported.
-    if (!profile.has_logic_op && !alphablend_enable) {
-        logic_op.Assign(requested_logic_op);
+    if (profile.has_logic_op) {
+        logic_op.Assign(Pica::FramebufferRegs::LogicOp::Copy);
     }
 
     if (!alphablend_enable) {
@@ -54,6 +53,14 @@ void FramebufferConfig::ApplyProfile(const Profile& profile) {
             requested_alpha_blend.SetMinMaxEmulationDisabled();
         }
     }
+
+    // Keep blend configs that min/max emulation doesn't use out of the shader key.
+    if (!requested_rgb_blend.RequiresMinMaxEmulation()) {
+        requested_rgb_blend.SetMinMaxEmulationDisabled();
+    }
+    if (!requested_alpha_blend.RequiresMinMaxEmulation()) {
+        requested_alpha_blend.SetMinMaxEmulationDisabled();
+    }
 }
 
 TextureConfig::TextureConfig(const Pica::TexturingRegs& regs) {
@@ -65,13 +72,12 @@ TextureConfig::TextureConfig(const Pica::TexturingRegs& regs) {
     fog_flip.Assign(regs.fog_flip != 0);
     shadow_texture_orthographic.Assign(regs.shadow.orthographic != 0);
 
+    using WrapMode = Pica::TexturingRegs::TextureConfig::WrapMode;
     const auto pica_textures = regs.GetTextures();
     for (u32 tex_index = 0; tex_index < 3; tex_index++) {
-        requested_wrap[tex_index].s = pica_textures[tex_index].config.wrap_s;
-        requested_wrap[tex_index].t = pica_textures[tex_index].config.wrap_t;
-
-        texture_border_color[tex_index].enable_s.Assign(false);
-        texture_border_color[tex_index].enable_t.Assign(false);
+        const auto& config = pica_textures[tex_index].config;
+        texture_border_color[tex_index].enable_s.Assign(config.wrap_s == WrapMode::ClampToBorder);
+        texture_border_color[tex_index].enable_t.Assign(config.wrap_t == WrapMode::ClampToBorder);
     }
 
     const auto& stages = regs.GetTevStages();
@@ -92,15 +98,7 @@ TextureConfig::TextureConfig(const Pica::TexturingRegs& regs) {
 void TextureConfig::ApplyProfile(const Profile& profile) {
     // Emulate custom border color if needed and not supported.
     if (profile.has_custom_border_color) {
-        return;
-    }
-
-    for (u32 i = 0; i < 3; i++) {
-        texture_border_color[i].enable_s.Assign(
-            requested_wrap[i].s == Pica::TexturingRegs::TextureConfig::WrapMode::ClampToBorder);
-
-        texture_border_color[i].enable_t.Assign(
-            requested_wrap[i].t == Pica::TexturingRegs::TextureConfig::WrapMode::ClampToBorder);
+        texture_border_color = {};
     }
 }
 
@@ -215,8 +213,9 @@ ProcTexConfig::ProcTexConfig(const Pica::TexturingRegs& regs) {
     lut_filter.Assign(regs.proctex_lut.filter);
 }
 
-FSConfig::FSConfig(const Pica::RegsInternal& regs)
+FSConfig::FSConfig(const Pica::RegsInternal& regs, const Profile& profile)
     : framebuffer{regs}, texture{regs.texturing}, lighting{regs.lighting}, proctex{regs.texturing} {
+    ApplyProfile(profile);
 }
 
 } // namespace Pica::Shader
