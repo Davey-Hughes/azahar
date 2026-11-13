@@ -2,8 +2,10 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <string_view>
 
 #include "common/common_paths.h"
 #include "common/file_util.h"
@@ -97,7 +99,21 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseProgrammableVer
         dst.size = src.size;
     }
 
-    const auto config_hash = config.Hash();
+    // PoC (AZAHAR_VS_SPECIALIZE_BOOLS=1): every PICA jump/call/if condition on a bool uniform
+    // reads uniforms.b, which is fixed for a draw. Key the shader on it and bake it in, so the
+    // driver can drop the branches (and most of the jump dispatcher) a draw never takes. This
+    // runs for every accelerated draw, so a change of b selects another variant.
+    static const bool specialize_bools = [] {
+        const char* const env = std::getenv("AZAHAR_VS_SPECIALIZE_BOOLS");
+        return env && std::string_view{env} == "1";
+    }();
+    u32 bools = 0;
+    for (u32 i = 0; i < setup.uniforms.b.size(); i++) {
+        bools |= u32{setup.uniforms.b[i]} << i;
+    }
+    const u64 config_hash = specialize_bools
+                                ? Common::HashCombine(config.Hash(), u64{bools} | (u64{1} << 32))
+                                : config.Hash();
 
     const auto [iter_config, new_config] = programmable_vertex_map.try_emplace(config_hash);
     if (new_config) {
@@ -106,8 +122,24 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseProgrammableVer
 
         ExtraVSConfig extra_config = parent.CalcExtraConfig(config);
 
-        auto program =
-            Common::HashableString(GLSL::GenerateVertexShader(setup, config, extra_config));
+        std::string glsl = GLSL::GenerateVertexShader(setup, config, extra_config);
+        if (specialize_bools) {
+            // Replace each read of the bool uniform (not the block member declaration "uint b;").
+            static constexpr std::string_view read = "uniforms.b";
+            const std::string value = fmt::format("{}u", bools);
+            for (std::size_t pos = glsl.find(read); pos != std::string::npos;
+                 pos = glsl.find(read, pos)) {
+                const std::size_t end = pos + read.size();
+                if (end < glsl.size() && (std::isalnum(static_cast<unsigned char>(glsl[end])) ||
+                                          glsl[end] == '_')) {
+                    pos = end;
+                    continue;
+                }
+                glsl.replace(pos, read.size(), value);
+                pos += value.size();
+            }
+        }
+        auto program = Common::HashableString(std::move(glsl));
 
         if (program.empty()) {
             LOG_ERROR(Render_Vulkan, "Failed to retrieve programmable vertex shader");
