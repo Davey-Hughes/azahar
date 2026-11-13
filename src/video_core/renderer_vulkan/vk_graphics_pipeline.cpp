@@ -3,8 +3,10 @@
 // Refer to the LICENSE.txt file included.
 
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include <boost/container/static_vector.hpp>
@@ -144,6 +146,9 @@ bool GraphicsPipeline::TryBuild(bool wait_built) {
     // The pipeline is currently being compiled. We can either wait for it
     // or skip the draw.
     if (is_pending) {
+        if (wait_built) {
+            PocBuildIfUnclaimed();
+        }
         return wait_built;
     }
 
@@ -166,20 +171,58 @@ bool GraphicsPipeline::TryBuild(bool wait_built) {
 
     // Fallback to (a)synchronous compilation
     poc_queued = PocClock::now();
-    auto build = [this] {
-        ApplyCompileWorkerNice();
-        const auto start = PocClock::now();
-        poc_started.store(true, std::memory_order_relaxed);
-        Build();
-        PocLogBuild(start, PocClock::now(), false);
-    };
     if (priority) {
-        worker->QueuePriorityWork(std::move(build));
+        worker->QueuePriorityWork([this] { PocRunBuildTask(); });
     } else {
-        worker->QueueWork(std::move(build));
+        worker->QueueWork([this] { PocRunBuildTask(); });
     }
     is_pending = true;
+    if (wait_built) {
+        PocBuildIfUnclaimed();
+    }
     return wait_built;
+}
+
+void GraphicsPipeline::PocRunBuildTask() {
+    // A pipeline can have a second build task at the front of the queue (PocBuildIfUnclaimed());
+    // whichever runs first builds it.
+    if (poc_build_claimed.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    ApplyCompileWorkerNice();
+    const auto start = PocClock::now();
+    poc_started.store(true, std::memory_order_relaxed);
+    Build();
+    PocLogBuild(start, PocClock::now(), false);
+}
+
+void GraphicsPipeline::PocBuildIfUnclaimed() {
+    // PoC: the caller is about to wait for this pipeline and no worker has started it.
+    // AZAHAR_BUILD_ON_WAIT=1 builds it on the waiting thread; =front queues a second build task
+    // at the front of its worker's queue, so a burst of waited pipelines still builds in parallel.
+    static const int mode = [] {
+        const char* const env = std::getenv("AZAHAR_BUILD_ON_WAIT");
+        const std::string_view value = env ? env : "";
+        return value == "1" ? 1 : value == "front" ? 2 : 0;
+    }();
+    if (mode == 0 || poc_build_claimed.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (mode == 2) {
+        if (poc_wait_mode.load(std::memory_order_relaxed) == 0) {
+            poc_wait_mode.store(2, std::memory_order_relaxed);
+            worker->QueuePriorityWork([this] { PocRunBuildTask(); });
+        }
+        return;
+    }
+    if (poc_build_claimed.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    const auto start = PocClock::now();
+    poc_started.store(true, std::memory_order_relaxed);
+    poc_wait_mode.store(1, std::memory_order_relaxed);
+    Build();
+    PocLogBuild(start, PocClock::now(), false);
 }
 
 bool GraphicsPipeline::Build(bool fail_on_compile_required) {
@@ -617,14 +660,15 @@ void GraphicsPipeline::PocLogBuild(PocClock::time_point start, PocClock::time_po
              "PoC pipeline built: uber={} fast={} vs={:016x} wait_shaders_ms={:.0f} "
              "queued_ms={:.0f} build_ms={:.1f} handoffs={} gpl_frag_ms={:.0f} gpl_vert_ms={:.1f} "
              "gpl_link_ms={:.1f} layout={:016x} color={} depth={} samples={} blend={} "
-             "logic_op={} gs={:016x}",
+             "logic_op={} gs={:016x} on_wait={}",
              poc_uber, fast, state.shader_ids[0], Ms(poc_queued - poc_created).count(),
              Ms(start - poc_queued).count(), Ms(end - start).count(),
              poc_handoffs.load(std::memory_order_relaxed), poc_gpl_ms[0], poc_gpl_ms[1],
              poc_gpl_ms[2], Common::ComputeStructHash64(state.vertex_layout),
              static_cast<u32>(state.attachments.color), static_cast<u32>(state.attachments.depth),
              state.attachments.sample_count, state.blending.blend_enable,
-             static_cast<u32>(state.blending.logic_op), state.shader_ids[2]);
+             static_cast<u32>(state.blending.logic_op), state.shader_ids[2],
+             poc_wait_mode.load(std::memory_order_relaxed));
 }
 
 } // namespace Vulkan

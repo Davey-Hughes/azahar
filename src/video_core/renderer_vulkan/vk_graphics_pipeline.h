@@ -361,6 +361,8 @@ private:
     using PocClock = std::chrono::steady_clock;
     void PocLogBuild(PocClock::time_point start, PocClock::time_point end, bool fast) const;
     void PocLogStats() const;
+    void PocBuildIfUnclaimed();
+    void PocRunBuildTask();
 
     // PoC GPL: vertex and fragment libraries, each shared across pipelines and threads by key.
     struct PocLibrary {
@@ -374,6 +376,11 @@ private:
     PocClock::time_point poc_created{PocClock::now()};
     PocClock::time_point poc_queued{};
     std::atomic<bool> poc_started{};
+    // Set by whichever thread builds the queued pipeline: its worker or the thread waiting for it.
+    std::atomic<bool> poc_build_claimed{};
+    // 0 = not waited on, 1 = built by the waiting thread, 2 = moved to the front of the queue.
+    // Written only by the thread that calls TryBuild(); read when logging the build.
+    std::atomic<int> poc_wait_mode{};
     std::atomic<u32> poc_handoffs{};
     bool poc_uber{};
     bool poc_fragment_only{};
