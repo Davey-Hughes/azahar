@@ -314,6 +314,10 @@ private:
 
     bool RecreateCache(CacheFile& file, CacheFileType type);
 
+    /// Hash of a pipeline in graphics_pipelines: its optimized hash with the vertex shader keyed
+    /// by program instead of by config.
+    u64 PipelineKey(const StaticPipelineInfo& state) const;
+
     bool InitVSCache(const std::atomic_bool& stop_loading,
                      const VideoCore::DiskResourceLoadCallback& callback);
 
@@ -348,8 +352,13 @@ private:
     PipelineCache& parent;
     u64 title_id;
 
+    struct VSProgram {
+        Shader* shader{};
+        u64 id{}; ///< Key in programmable_vertex_cache
+    };
+
     std::unordered_map<u64, Shader> programmable_vertex_cache;
-    std::unordered_map<u64, Shader*> programmable_vertex_map;
+    std::unordered_map<u64, VSProgram> programmable_vertex_map;
     std::unordered_set<u64> known_vertex_programs;
 
     std::unordered_map<u64, Shader> fragment_shaders;

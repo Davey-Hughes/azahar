@@ -189,10 +189,10 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseProgrammableVer
 
         AppendVSConfigProgram(vs_cache, config, setup, config_hash, spirv_id);
 
-        iter_config->second = &shader;
+        iter_config->second = {&shader, spirv_id};
     }
 
-    Shader* const shader{iter_config->second};
+    Shader* const shader{iter_config->second.shader};
     if (!shader) {
         LOG_ERROR(Render_Vulkan, "Failed to retrieve programmable vertex shader");
         return {};
@@ -292,10 +292,22 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseFixedGeometrySh
     }
 }
 
+u64 ShaderDiskCache::PipelineKey(const StaticPipelineInfo& state) const {
+    // Vertex shader configs that differ only in program data the shader never reads share one
+    // module, so they can share pipelines too. The stored pipeline info keeps the config hash,
+    // which stays valid when the shader generator changes.
+    StaticPipelineInfo key = state;
+    u64& vs_id = key.shader_ids[ProgramType::VS];
+    if (const auto it = programmable_vertex_map.find(vs_id); it != programmable_vertex_map.end()) {
+        vs_id = it->second.id;
+    }
+    return key.OptimizedHash(parent.instance);
+}
+
 GraphicsPipeline* ShaderDiskCache::GetPipeline(const PipelineInfo& info) {
 
     u64 hash = info.Hash();
-    u64 optimized_hash = info.state.OptimizedHash(parent.instance);
+    u64 optimized_hash = PipelineKey(info.state);
 
     auto [it, new_pipeline] = graphics_pipelines.try_emplace(optimized_hash);
     if (new_pipeline) {
@@ -838,7 +850,7 @@ bool ShaderDiskCache::InitVSCache(const std::atomic_bool& stop_loading,
                 LOG_DEBUG(Render_Vulkan, "    linked with existing SPIRV {:016X}.",
                           entry->spirv_entry_id);
 
-                iter_config->second = &shader_it->second;
+                iter_config->second = {&shader_it->second, entry->spirv_entry_id};
                 known_vertex_programs.emplace(entry->program_entry_id).second;
             } else {
                 // Cached SPIRV not found, need to recompile.
@@ -941,7 +953,7 @@ bool ShaderDiskCache::InitVSCache(const std::atomic_bool& stop_loading,
                 }
 
                 // Asign the SPIRV shader to the config
-                iter_config->second = &iter_prog->second;
+                iter_config->second = {&iter_prog->second, spirv_id};
 
                 LOG_DEBUG(Render_Vulkan, "    linked with SPIRV {:016X}.", entry->spirv_entry_id);
             }
@@ -1474,7 +1486,7 @@ bool ShaderDiskCache::InitPLCache(const std::atomic_bool& stop_loading,
             }
 
             known_graphic_pipelines.emplace(curr.Id());
-            auto pl_hash_opt = entry->pl_info.OptimizedHash(parent.instance);
+            auto pl_hash_opt = PipelineKey(entry->pl_info);
 
             if (graphics_pipelines.find(pl_hash_opt) != graphics_pipelines.end()) {
                 // Multiple entries can have the same optimized hash. Skip if that's the case.
@@ -1499,7 +1511,7 @@ bool ShaderDiskCache::InitPLCache(const std::atomic_bool& stop_loading,
                               entry->pl_info.shader_ids[ProgramType::VS], curr.Id());
                     continue;
                 }
-                shaders[ProgramType::VS] = it_vs->second;
+                shaders[ProgramType::VS] = it_vs->second.shader;
             } else {
                 shaders[ProgramType::VS] = &parent.trivial_vertex_shader;
             }
