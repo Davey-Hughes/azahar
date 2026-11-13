@@ -2,6 +2,9 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <cstdlib>
+#include <map>
+#include <string>
 #include <boost/hana/string.hpp>
 
 #include "citra_libretro/core_settings.h"
@@ -10,6 +13,7 @@
 
 #include "common/file_util.h"
 #include "common/settings.h"
+#include "core/core.h"
 #include "core/hle/service/cfg/cfg.h"
 
 namespace BaseKeys = Settings::HKeys;
@@ -66,6 +70,9 @@ static constexpr const char* texture_filter = citra_setting(BaseKeys::texture_fi
 static constexpr const char* texture_sampling = citra_setting(BaseKeys::texture_sampling);
 static constexpr const char* custom_textures = citra_setting(BaseKeys::custom_textures);
 static constexpr const char* dump_textures = citra_setting(BaseKeys::dump_textures);
+// Personal build options (ubershader PoC), not upstream.
+static constexpr const char* shader_compilation = "citra_shader_compilation";
+static constexpr const char* fast_pipeline_linking = "citra_fast_pipeline_linking";
 } // namespace graphics
 
 namespace layout {
@@ -369,6 +376,40 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
         "Hardware Shader Cache",
         "Shader Cache",
         "Save compiled shaders to disk to reduce loading times on subsequent runs.",
+        nullptr,
+        config::category::graphics,
+        {
+            { config::enabled, "Enabled" },
+            { config::disabled, "Disabled" },
+            { nullptr, nullptr }
+        },
+        config::enabled
+    },
+    {
+        config::graphics::shader_compilation,
+        "Shader Compilation (Vulkan)",
+        "Shader Compilation",
+        "How the Vulkan renderer handles a shader it hasn't compiled yet. Synchronous waits for "
+        "it (stutter). Asynchronous skips those draws until it's ready. Asynchronous + "
+        "Ubershaders draws them with a generic shader meanwhile; it needs EDS3 (Turnip, RADV) "
+        "and otherwise acts as Asynchronous. Restart RetroArch to apply.",
+        nullptr,
+        config::category::graphics,
+        {
+            { "ubershaders", "Asynchronous + Ubershaders" },
+            { "async", "Asynchronous" },
+            { "sync", "Synchronous" },
+            { nullptr, nullptr }
+        },
+        "ubershaders"
+    },
+    {
+        config::graphics::fast_pipeline_linking,
+        "Fast Pipeline Linking (Vulkan)",
+        "Fast Pipeline Linking",
+        "Link pipelines from shared shader libraries (VK_EXT_graphics_pipeline_library), which "
+        "cuts compile stutter. Needs Turnip or RADV; ignored elsewhere. Restart RetroArch to "
+        "apply.",
         nullptr,
         config::category::graphics,
         {
@@ -1032,6 +1073,26 @@ static Settings::GraphicsAPI GetGraphicsAPI(const std::string& name) {
     return LibRetro::GetPreferredRenderer();
 }
 
+// Personal build: the ubershader PoC's switches are AZAHAR_* environment variables, most read
+// once per process. Set them from the core options, unless the variable was already set when
+// the core first looked, so a desktop run can still override one from the shell.
+static void SetPocSwitch(const char* name, bool on) {
+    static std::map<std::string, bool, std::less<>> set_outside;
+    const auto [it, first] = set_outside.try_emplace(name, std::getenv(name) != nullptr);
+    if (it->second) {
+        return;
+    }
+#ifdef _WIN32
+    _putenv_s(name, on ? "1" : "");
+#else
+    if (on) {
+        setenv(name, "1", 1);
+    } else {
+        unsetenv(name);
+    }
+#endif
+}
+
 static void ParseGraphicsOptions(void) {
     Settings::values.graphics_api =
         GetGraphicsAPI(LibRetro::FetchVariable(config::graphics::graphics_api, "auto"));
@@ -1054,6 +1115,23 @@ static void ParseGraphicsOptions(void) {
     Settings::values.use_disk_shader_cache =
         LibRetro::FetchVariable(config::graphics::use_disk_shader_cache, config::enabled) ==
         config::enabled;
+
+    // Personal build: the renderer reads these once, so only apply them before the emulator
+    // starts (retro_load_game), not on a mid-game option change.
+    if (!Core::System::GetInstance().IsPoweredOn()) {
+        const auto mode = LibRetro::FetchVariable(config::graphics::shader_compilation, "ubershaders");
+        Settings::values.async_shader_compilation = mode != "sync";
+        Settings::values.use_ubershaders = mode == "ubershaders";
+        Settings::values.ubershader_cpu_vertex = false;
+
+        const bool gpl = LibRetro::FetchVariable(config::graphics::fast_pipeline_linking,
+                                                 config::enabled) == config::enabled;
+        SetPocSwitch("AZAHAR_UBER_GPL", gpl);
+        SetPocSwitch("AZAHAR_SPEC_GPL", gpl);
+        SetPocSwitch("AZAHAR_GPL_PARK", gpl);
+        SetPocSwitch("AZAHAR_SKIP_UNREADY_FALLBACK", true);
+        SetPocSwitch("AZAHAR_VS_SPECIALIZE_BOOLS", true);
+    }
 
     auto resolution = LibRetro::FetchVariable(config::graphics::resolution_factor, "1");
     Settings::values.resolution_factor = std::stoi(resolution);
