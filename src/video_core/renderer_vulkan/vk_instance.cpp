@@ -483,15 +483,21 @@ bool Instance::CreateDevice() {
     const bool has_fragment_shader_barycentric =
         add_extension(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME, is_moltenvk,
                       "the PerVertexKHR attribute is not supported by MoltenVK");
-    // Dynamic blend lets one ubershader pipeline cover every blend mode. It changes how every
-    // pipeline is built, so keep it off unless the ubershader is on.
+    // PoC GPL toggles. AZAHAR_UBER_GPL=1 needs the ubershader; AZAHAR_SPEC_GPL=1 also works
+    // without it (sync or plain async compilation), for specialized pipelines only.
+    const auto env_is_1 = [](const char* name) {
+        const char* const value = std::getenv(name);
+        return value && std::string_view{value} == "1";
+    };
+    const bool use_ubershaders = Settings::values.use_ubershaders.GetValue();
+    const bool want_spec_gpl = env_is_1("AZAHAR_SPEC_GPL");
+    const bool want_poc_gpl = (use_ubershaders && env_is_1("AZAHAR_UBER_GPL")) || want_spec_gpl;
+    // Dynamic blend lets one ubershader pipeline cover every blend mode, and keeps blend state
+    // out of the GPL fragment libraries. It changes how every pipeline is built, so keep it off
+    // unless the ubershader or PoC GPL is on.
     const bool has_extended_dynamic_state3 =
-        Settings::values.use_ubershaders.GetValue() &&
+        (use_ubershaders || want_poc_gpl) &&
         add_extension(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
-    // PoC: only with AZAHAR_UBER_GPL=1, so one binary can compare both ways of building.
-    const char* const poc_gpl_env = std::getenv("AZAHAR_UBER_GPL");
-    const bool want_poc_gpl = Settings::values.use_ubershaders.GetValue() && poc_gpl_env &&
-                              std::string_view{poc_gpl_env} == "1";
     const bool has_graphics_pipeline_library =
         want_poc_gpl && add_extension(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME) &&
         add_extension(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
@@ -643,8 +649,7 @@ bool Instance::CreateDevice() {
         gpl_properties.graphicsPipelineLibraryFastLinking && extended_dynamic_state &&
         extended_dynamic_state3) {
         poc_uber_gpl = true;
-        const char* const spec_env = std::getenv("AZAHAR_SPEC_GPL");
-        poc_spec_gpl = spec_env && std::string_view{spec_env} == "1";
+        poc_spec_gpl = want_spec_gpl;
         device_chain.get<vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>()
             .graphicsPipelineLibrary = true;
         LOG_INFO(Render_Vulkan,
