@@ -107,6 +107,10 @@ private:
     /// Generic draw function for DrawTriangles and AccelerateDrawBatch
     bool Draw(bool accelerate, bool is_indexed);
 
+    /// Whether the pipeline DrawTriangles() would use for the current state is built (queues it
+    /// if not)
+    bool IsFallbackPipelineReady();
+
     /// Internal implementation for AccelerateDrawBatch
     bool AccelerateDrawBatchInternal(bool is_indexed, bool force_wait);
     void PocNoteVsBools();
@@ -165,6 +169,10 @@ private:
     // Cleared by AZAHAR_UBERSHADER_SMALL_DRAWS=0 (PoC only): draws of 6 or fewer vertices then
     // wait for their pipeline, as upstream does, instead of taking the ubershader.
     bool ubershader_small_draws{true};
+    // Set by AZAHAR_SKIP_UNREADY_FALLBACK=1 (PoC only): when the CPU vertex path's pipeline
+    // isn't built either, an accelerated draw doesn't hand off; it skips (or waits, if small)
+    // as async mode without the ubershader does. See RasterizerVulkan::Draw().
+    bool skip_unready_fallback{false};
     // Set by an accelerated draw that hands itself to the CPU vertex path. Read and cleared at the
     // top of the next RasterizerVulkan::Draw(), and also cleared by an empty
     // RasterizerVulkan::DrawTriangles().
@@ -177,6 +185,9 @@ private:
         u64 uber_gpu{};
         u64 uber_cpu{};
         u64 unsupported{};
+        // Accelerated draws not handed off because the CPU vertex path's pipeline wasn't built
+        // (skip_unready_fallback)
+        u64 fallback_unready{};
         // unsupported, split by the first missing feature (Pica::Shader::FindUbershaderGap())
         std::array<u64, static_cast<std::size_t>(Pica::Shader::UbershaderGap::Count)>
             unsupported_by_gap{};
