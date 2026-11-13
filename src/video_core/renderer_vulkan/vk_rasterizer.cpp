@@ -164,15 +164,18 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
     force_ubershader = use_ubershaders && std::getenv("AZAHAR_UBERSHADER_FORCE") != nullptr;
     const char* small_draws = std::getenv("AZAHAR_UBERSHADER_SMALL_DRAWS");
     ubershader_small_draws = !(small_draws && std::string_view{small_draws} == "0");
+    const char* skip_unready = std::getenv("AZAHAR_SKIP_UNREADY_FALLBACK");
+    skip_unready_fallback = skip_unready && std::string_view{skip_unready} == "1";
     if (const char* slow_ms = std::getenv("AZAHAR_SLOW_FRAME_MS")) {
         slow_frame_ms = static_cast<u32>(std::strtoul(slow_ms, nullptr, 10));
         LOG_INFO(Render_Vulkan, "Slow frame log: frames over {} ms", slow_frame_ms);
     }
     const char* worker_nice = std::getenv("AZAHAR_WORKER_NICE");
     LOG_INFO(Render_Vulkan,
-             "Ubershaders: {} (cpu vertex: {}, forced: {}, small draws: {}, worker nice: {})",
+             "Ubershaders: {} (cpu vertex: {}, forced: {}, small draws: {}, skip unready "
+             "fallback: {}, worker nice: {})",
              use_ubershaders, ubershader_cpu_vertex, force_ubershader, ubershader_small_draws,
-             worker_nice ? worker_nice : "unset");
+             skip_unready_fallback, worker_nice ? worker_nice : "unset");
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
@@ -252,10 +255,11 @@ void RasterizerVulkan::LogUbershaderStats() const {
     const auto pipelines = pipeline_cache.GetPipelineCounts();
     LOG_INFO(Render_Vulkan,
              "Ubershader stats: frames={} slow_frames={} waits={} wait_ms={} skipped={} "
-             "uber_gpu={} uber_cpu={} unsupported={} pipelines={} uber_pipelines={}",
+             "uber_gpu={} uber_cpu={} unsupported={} pipelines={} uber_pipelines={} "
+             "fallback_unready={}",
              uber_stats.frames, uber_stats.slow_frames, waits.count, waits.ns / 1'000'000,
              uber_stats.skipped, uber_stats.uber_gpu, uber_stats.uber_cpu, uber_stats.unsupported,
-             pipelines.specialized, pipelines.ubershader);
+             pipelines.specialized, pipelines.ubershader, uber_stats.fallback_unready);
     LogDrawTimes();
     if (uber_stats.unsupported == 0) {
         return;
@@ -751,6 +755,13 @@ void RasterizerVulkan::DrawTriangles() {
     Draw(false, false);
 }
 
+bool RasterizerVulkan::IsFallbackPipelineReady() {
+    PipelineInfo info = pipeline_info;
+    info.state.rasterization.topology.Assign(Pica::PipelineRegs::TriangleTopology::List);
+    info.state.vertex_layout = software_layout;
+    return pipeline_cache.IsTrivialVertexPipelineReady(info);
+}
+
 bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     MICROPROFILE_SCOPE(Vulkan_Drawing);
 
@@ -852,19 +863,27 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
                 ++uber_stats.uber_gpu;
                 draw_path = DrawPath::UberGpu;
             } else {
-                // CPU vertex path, or the GPU vertex path's pipeline isn't built yet: PICA runs
-                // the vertex shader on the CPU (PicaCore::DrawArrays() in
-                // src/video_core/pica/pica_core.cpp) and calls DrawTriangles().
-                if (!ubershader_cpu_vertex) {
-                    if (GraphicsPipeline* const waiting = pipeline_cache.LastReadyCheck()) {
+                GraphicsPipeline* const waiting =
+                    ubershader_cpu_vertex ? nullptr : pipeline_cache.LastReadyCheck();
+                if (skip_unready_fallback && !force_ubershader && !IsFallbackPipelineReady()) {
+                    // The CPU vertex path's pipeline isn't built either (at boot, or the first
+                    // draw to a new attachment format), and that path would wait for it: 3.2 s
+                    // at albw's boot. Draw as async mode does without the ubershader.
+                    pipeline_cache.UseFragmentShader(regs, user_config);
+                    ++uber_stats.fallback_unready;
+                } else {
+                    // CPU vertex path, or the GPU vertex path's pipeline isn't built yet: PICA
+                    // runs the vertex shader on the CPU (PicaCore::DrawArrays() in
+                    // src/video_core/pica/pica_core.cpp) and calls DrawTriangles().
+                    if (waiting) {
                         ++uber_stats.handoff_wait[static_cast<std::size_t>(
                             waiting->PocNoteHandoff())];
                     }
+                    ubershader_fallback_pending = true;
+                    draw_path = DrawPath::Handoff;
+                    handoff_time = std::chrono::steady_clock::now();
+                    return false;
                 }
-                ubershader_fallback_pending = true;
-                draw_path = DrawPath::Handoff;
-                handoff_time = std::chrono::steady_clock::now();
-                return false;
             }
         }
     } else if (fallback_draw) {

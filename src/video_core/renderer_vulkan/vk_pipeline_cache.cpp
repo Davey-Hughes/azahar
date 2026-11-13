@@ -751,6 +751,17 @@ bool PipelineCache::IsPipelineReady(PipelineInfo& info) {
     return pipeline->IsDone() || pipeline->TryBuild(false);
 }
 
+bool PipelineCache::IsTrivialVertexPipelineReady(PipelineInfo& info) {
+    const auto shaders = current_shaders;
+    const auto hashes = shader_hashes;
+    UseTrivialVertexShader();
+    UseTrivialGeometryShader();
+    const bool ready = IsPipelineReady(info);
+    current_shaders = shaders;
+    shader_hashes = hashes;
+    return ready;
+}
+
 Pica::Shader::FSConfig PipelineCache::MakeFSConfig(const Pica::RegsInternal& regs) const {
     Pica::Shader::FSConfig config{regs};
     config.ApplyProfile(profile);

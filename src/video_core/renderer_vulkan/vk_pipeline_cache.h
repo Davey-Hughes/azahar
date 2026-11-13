@@ -96,6 +96,10 @@ public:
     /// like an async BindPipeline() but records nothing.
     bool IsPipelineReady(PipelineInfo& info);
 
+    /// IsPipelineReady() with the passthrough vertex and geometry shaders in place of the bound
+    /// ones, which it keeps.
+    bool IsTrivialVertexPipelineReady(PipelineInfo& info);
+
     // PoC GPL: queue the ubershader fragment libraries for the common attachment combinations
     // (color RGBA8 or none, depth D24S8 or none) at the front of the pipeline workers.
     void PocPrewarmFragmentLibraries();
