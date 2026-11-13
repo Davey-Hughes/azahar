@@ -643,11 +643,15 @@ bool Instance::CreateDevice() {
         gpl_properties.graphicsPipelineLibraryFastLinking && extended_dynamic_state &&
         extended_dynamic_state3) {
         poc_uber_gpl = true;
+        const char* const spec_env = std::getenv("AZAHAR_SPEC_GPL");
+        poc_spec_gpl = spec_env && std::string_view{spec_env} == "1";
         device_chain.get<vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>()
             .graphicsPipelineLibrary = true;
         LOG_INFO(Render_Vulkan,
-                 "PoC GPL ubershader pipelines enabled (independent interpolation: {})",
-                 gpl_properties.graphicsPipelineLibraryIndependentInterpolationDecoration);
+                 "PoC GPL ubershader pipelines enabled (independent interpolation: {}, "
+                 "specialized pipelines too: {})",
+                 gpl_properties.graphicsPipelineLibraryIndependentInterpolationDecoration,
+                 poc_spec_gpl);
     } else {
         device_chain.unlink<vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>();
         if (want_poc_gpl) {
