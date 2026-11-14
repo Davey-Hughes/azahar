@@ -14,6 +14,7 @@ add_executable(tests
     audio_core/lle/lle.cpp
     audio_core/audio_fixures.h
     audio_core/decoder_tests.cpp
+    video_core/glsl_shader_decompiler.cpp
     video_core/pica_types.cpp
     video_core/shader.cpp
     video_core/ubershader_config.cpp

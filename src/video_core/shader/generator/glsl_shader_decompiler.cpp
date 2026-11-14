@@ -7,6 +7,7 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <vector>
 #include <fmt/format.h>
 #include <nihstro/shader_bytecode.h>
 #include "common/assert.h"
@@ -28,6 +29,17 @@ class DecompileFail : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
+
+/// Evaluates a bool uniform test against the bool uniforms the shader is specialized on.
+static bool TestUniformBool(u16 bool_uniforms, u32 index, bool invert_test) {
+    return (((bool_uniforms >> index) & 1) != 0) != invert_test;
+}
+
+/// Whether a JMPU jumps. The test is inverted when the lowest bit of num_instructions is set.
+static bool IsJumpTaken(const Instruction& instr, u16 bool_uniforms) {
+    return TestUniformBool(bool_uniforms, instr.flow_control.bool_uniform_id,
+                           (instr.flow_control.num_instructions & 1) != 0);
+}
 
 /// Describes the behaviour of code path of a given entry point and a return point.
 enum class ExitMethod {
@@ -57,8 +69,8 @@ struct Subroutine {
 /// Analyzes shader code and produces a set of subroutines.
 class ControlFlowAnalyzer {
 public:
-    ControlFlowAnalyzer(const ProgramCode& program_code, u32 main_offset)
-        : program_code(program_code) {
+    ControlFlowAnalyzer(const ProgramCode& program_code, u32 main_offset, u16 bool_uniforms)
+        : program_code(program_code), bool_uniforms(bool_uniforms) {
 
         // Recursively finds all subroutines.
         const Subroutine& program_main = AddSubroutine(main_offset, PROGRAM_END);
@@ -72,6 +84,7 @@ public:
 
 private:
     const ProgramCode& program_code;
+    const u16 bool_uniforms;
     std::set<Subroutine> subroutines;
     std::map<std::pair<u32, u32>, ExitMethod> exit_method_map;
 
@@ -122,6 +135,40 @@ private:
         return ExitMethod::Conditional;
     }
 
+    /**
+     * Whether code starting at `from` can get to `target` before `end`, following the JMPUs the
+     * bool uniforms resolve. Conservative: both paths of a JMPC, and every instruction of IF and
+     * LOOP blocks, count as reachable.
+     */
+    bool CanReach(u32 from, u32 target, u32 end) const {
+        std::set<u32> seen;
+        std::vector<u32> pending{from};
+        while (!pending.empty()) {
+            u32 offset = pending.back();
+            pending.pop_back();
+            for (; offset != end && offset != PROGRAM_END; ++offset) {
+                if (offset == target) {
+                    return true;
+                }
+                if (!seen.insert(offset).second) {
+                    break;
+                }
+                const Instruction instr = {program_code[offset]};
+                const auto opcode = instr.opcode.Value();
+                if (opcode == OpCode::Id::END) {
+                    break;
+                }
+                if (opcode == OpCode::Id::JMPC) {
+                    pending.push_back(instr.flow_control.dest_offset);
+                } else if (opcode == OpCode::Id::JMPU && IsJumpTaken(instr, bool_uniforms)) {
+                    pending.push_back(instr.flow_control.dest_offset);
+                    break;
+                }
+            }
+        }
+        return false;
+    }
+
     /// Scans a range of code for labels and determines the exit method.
     ExitMethod Scan(u32 begin, u32 end, std::set<u32>& labels) {
         auto [iter, inserted] =
@@ -136,8 +183,20 @@ private:
             case OpCode::Id::END: {
                 return exit_method = ExitMethod::AlwaysEnd;
             }
-            case OpCode::Id::JMPC:
             case OpCode::Id::JMPU: {
+                // The bool uniforms are known, so a JMPU either never or always jumps.
+                if (!IsJumpTaken(instr, bool_uniforms)) {
+                    break;
+                }
+                // Without a label, the generator continues compiling at the target. That only
+                // works if the code there can't come back to this jump.
+                const u32 dest = instr.flow_control.dest_offset;
+                if (dest < end && !CanReach(dest, offset, end)) {
+                    return exit_method = Scan(dest, end, labels);
+                }
+                [[fallthrough]];
+            }
+            case OpCode::Id::JMPC: {
                 labels.insert(instr.flow_control.dest_offset);
                 ExitMethod no_jmp = Scan(offset + 1, end, labels);
                 ExitMethod jmp = Scan(instr.flow_control.dest_offset, end, labels);
@@ -359,8 +418,7 @@ private:
 
     /// Generates a bool uniform test, a constant since the shader is specialized on them
     std::string GetUniformBool(u32 index, bool invert_test = false) const {
-        const bool value = ((bool_uniforms >> index) & 1) != 0;
-        return value != invert_test ? "true" : "false";
+        return TestUniformBool(bool_uniforms, index, invert_test) ? "true" : "false";
     }
 
     /**
@@ -667,17 +725,23 @@ private:
                 break;
             }
 
-            case OpCode::Id::JMPC:
             case OpCode::Id::JMPU: {
-                std::string condition;
-                if (instr.opcode.Value() == OpCode::Id::JMPC) {
-                    condition = EvaluateCondition(instr.flow_control);
-                } else {
-                    const bool invert_test = instr.flow_control.num_instructions & 1;
-                    condition = GetUniformBool(instr.flow_control.bool_uniform_id, invert_test);
+                if (!IsJumpTaken(instr, bool_uniforms)) {
+                    break;
                 }
+                // ControlFlowAnalyzer only makes a label of a JMPU target it can't follow, so
+                // keep compiling at any other target. CompileRange() returns targets past its
+                // range, and Generate() turns those into a jump to a new label.
+                const u32 dest = instr.flow_control.dest_offset;
+                if (!current_labels->contains(dest)) {
+                    return dest;
+                }
+                shader.AddLine("{{ jmp_to = {}u; break; }}", dest);
+                break;
+            }
 
-                shader.AddLine("if ({}) {{", condition);
+            case OpCode::Id::JMPC: {
+                shader.AddLine("if ({}) {{", EvaluateCondition(instr.flow_control));
                 ++shader.scope;
                 shader.AddLine("{{ jmp_to = {}u; break; }}",
                                instr.flow_control.dest_offset.Value());
@@ -817,8 +881,13 @@ private:
      * @return the offset of the next instruction to compile. PROGRAM_END if the program terminates.
      */
     u32 CompileRange(u32 begin, u32 end) {
+        std::set<u32> compiled;
         u32 program_counter;
         for (program_counter = begin; program_counter < (begin > end ? PROGRAM_END : end);) {
+            // A followed JMPU must not lead back into code already compiled here
+            if (!compiled.insert(program_counter).second) {
+                throw DecompileFail("Loop through a JMPU without a label");
+            }
             program_counter = CompileInstr(program_counter);
         }
         return program_counter;
@@ -867,6 +936,7 @@ private:
         // Add definitions for all subroutines
         for (const auto& subroutine : subroutines) {
             std::set<u32> labels = subroutine.labels;
+            current_labels = &labels;
 
             shader.AddLine("bool {}() {{", subroutine.GetName());
             ++shader.scope;
@@ -892,7 +962,7 @@ private:
 
                     u32 compile_end = CompileRange(label, next_label);
                     if (compile_end > next_label && compile_end != PROGRAM_END) {
-                        // This happens only when there is a label inside a IF/LOOP block
+                        // A label inside an IF/LOOP block, or a followed JMPU, left the range
                         shader.AddLine("{{ jmp_to = {}u; break; }}", compile_end);
                         labels.emplace(compile_end);
                     }
@@ -927,6 +997,9 @@ private:
     const RegGetter& outputreg_getter;
     const bool sanitize_mul;
 
+    /// Labels of the subroutine being compiled
+    const std::set<u32>* current_labels = nullptr;
+
     ShaderWriter shader;
 };
 
@@ -935,7 +1008,8 @@ std::string DecompileProgram(const ProgramCode& program_code, const SwizzleData&
                              const RegGetter& outputreg_getter, bool sanitize_mul) {
 
     try {
-        auto subroutines = ControlFlowAnalyzer(program_code, main_offset).MoveSubroutines();
+        auto subroutines =
+            ControlFlowAnalyzer(program_code, main_offset, bool_uniforms).MoveSubroutines();
         GLSLGenerator generator(subroutines, program_code, swizzle_data, main_offset, bool_uniforms,
                                 inputreg_getter, outputreg_getter, sanitize_mul);
         return generator.MoveShaderCode();
