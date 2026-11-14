@@ -308,14 +308,8 @@ vec4 sampleTexUnit3() {
     return vec4(0.0);
 }
 
-vec4 sample_tex_unit(uint unit) {
-    switch (unit) {
-    case 0u: return sampleTexUnit0();
-    case 1u: return sampleTexUnit1();
-    case 2u: return sampleTexUnit2();
-    default: return sampleTexUnit3();
-    }
-}
+// Texture unit colors, sampled once per fragment by sample_used_textures().
+vec4 g_texcolor[4];
 
 // Fragment lighting
 bool lut_supported(uint kind, uint cfgL) {
@@ -387,7 +381,7 @@ void do_lighting() {
     vec3 surface_normal;
     vec3 surface_tangent;
     if (bump_mode == 1u) { // NormalMap
-        surface_normal = 2.0 * sample_tex_unit(bump_selector).rgb - 1.0;
+        surface_normal = 2.0 * g_texcolor[bump_selector].rgb - 1.0;
         if (bump_renorm) {
             surface_normal.z = sqrt(max(
                 1.0 - (surface_normal.x * surface_normal.x + surface_normal.y * surface_normal.y),
@@ -395,7 +389,7 @@ void do_lighting() {
         }
         surface_tangent = vec3(1.0, 0.0, 0.0);
     } else if (bump_mode == 2u) { // TangentMap
-        surface_tangent = 2.0 * sample_tex_unit(bump_selector).rgb - 1.0;
+        surface_tangent = 2.0 * g_texcolor[bump_selector].rgb - 1.0;
         surface_normal = vec3(0.0, 0.0, 1.0);
     } else {
         surface_normal = vec3(0.0, 0.0, 1.0);
@@ -408,7 +402,7 @@ void do_lighting() {
 
     vec4 shadow = vec4(1.0);
     if (enable_shadow) {
-        shadow = sample_tex_unit(shadow_selector);
+        shadow = g_texcolor[shadow_selector];
         if (shadow_invert) {
             shadow = vec4(1.0) - shadow;
         }
@@ -519,16 +513,45 @@ void do_lighting() {
     g_secondary_fragment_color = clamp(specular_sum, vec4(0.0), vec4(1.0));
 }
 
+// Samples each texture unit that a TEV stage or lighting reads, once per fragment, as the
+// specialized generator does. Sampling inside tev_source() inlined every sampler at each of
+// its call sites, which made the shader ~3x larger and slow to compile on Turnip.
+bool is_passthrough_stage(uint sources, uint modifiers, uint ops, uint scales);
+void sample_used_textures() {
+    uint used = 0u;
+    for (int i = 0; i < NUM_TEV_STAGES; ++i) {
+        uvec4 t = cfg_tev[i];
+        if (is_passthrough_stage(t.x, t.y, t.z, t.w)) {
+            continue;
+        }
+        for (int f = 0; f < 3; ++f) {
+            uint cs = bitfieldExtract(t.x, 4 * f, 4);
+            uint as = bitfieldExtract(t.x, 16 + 4 * f, 4);
+            if (cs >= 3u && cs <= 6u) used |= 1u << (cs - 3u);
+            if (as >= 3u && as <= 6u) used |= 1u << (as - 3u);
+        }
+    }
+    if ((cfg_lighting & 1u) != 0u) {
+        uint bump_mode = bitfieldExtract(cfg_lighting, 5, 2);
+        if (bump_mode == 1u || bump_mode == 2u) used |= 1u << bitfieldExtract(cfg_lighting, 7, 2);
+        if ((cfg_lighting & (1u << 17)) != 0u) used |= 1u << bitfieldExtract(cfg_lighting, 22, 2);
+    }
+    g_texcolor[0] = (used & 1u) != 0u ? sampleTexUnit0() : vec4(0.0);
+    g_texcolor[1] = (used & 2u) != 0u ? sampleTexUnit1() : vec4(0.0);
+    g_texcolor[2] = (used & 4u) != 0u ? sampleTexUnit2() : vec4(0.0);
+    g_texcolor[3] = (used & 8u) != 0u ? sampleTexUnit3() : vec4(0.0);
+}
+
 // TEV stages.
 vec4 tev_source(uint source, int tev_index) {
     switch (source) {
     case 0x0u: return g_rounded_primary_color;
     case 0x1u: return g_primary_fragment_color;
     case 0x2u: return g_secondary_fragment_color;
-    case 0x3u: return sampleTexUnit0();
-    case 0x4u: return sampleTexUnit1();
-    case 0x5u: return sampleTexUnit2();
-    case 0x6u: return sampleTexUnit3();
+    case 0x3u: return g_texcolor[0];
+    case 0x4u: return g_texcolor[1];
+    case 0x5u: return g_texcolor[2];
+    case 0x6u: return g_texcolor[3];
     case 0xdu: return g_combiner_buffer;
     case 0xeu: return const_color[tev_index];
     case 0xfu: return g_combiner_output;
@@ -713,6 +736,7 @@ void main() {
         g_depth /= gl_FragCoord.w;
     }
 
+    sample_used_textures();
     if ((cfg_lighting & 1u) != 0u) {
         do_lighting();
     }
