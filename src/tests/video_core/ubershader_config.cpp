@@ -15,13 +15,11 @@ using TextureType = Pica::TexturingRegs::TextureConfig::TextureType;
 namespace {
 FSConfig MakeConfig() {
     static const Pica::RegsInternal regs{};
-    FSConfig config{regs};
     Profile profile{};
     profile.has_logic_op = true;
     profile.has_custom_border_color = true;
     profile.is_vulkan = true;
-    config.ApplyProfile(profile);
-    return config;
+    return FSConfig{regs, profile};
 }
 } // namespace
 
@@ -85,12 +83,12 @@ TEST_CASE("Ubershader supports shadow maps", "[video_core][ubershader]") {
 }
 
 TEST_CASE("BuildFSConfigUniform packs the config", "[video_core][ubershader]") {
-    static const Pica::RegsInternal regs{};
-    FSConfig config{regs};
-    config.texture.requested_wrap[1].t = Pica::TexturingRegs::TextureConfig::WrapMode::ClampToBorder;
-    Profile profile{}; // No custom border color, so ApplyProfile turns on border emulation.
+    static Pica::RegsInternal regs{};
+    regs.texturing.texture1.wrap_t.Assign(
+        Pica::TexturingRegs::TextureConfig::WrapMode::ClampToBorder);
+    Profile profile{}; // No custom border color, so border emulation stays on.
     profile.has_logic_op = true;
-    config.ApplyProfile(profile);
+    FSConfig config{regs, profile};
 
     config.texture.fog_mode.Assign(Pica::TexturingRegs::FogMode::Fog);
     config.texture.fog_flip.Assign(1);

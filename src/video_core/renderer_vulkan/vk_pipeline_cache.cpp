@@ -769,9 +769,7 @@ bool PipelineCache::IsTrivialVertexPipelineReady(PipelineInfo& info) {
 }
 
 Pica::Shader::FSConfig PipelineCache::MakeFSConfig(const Pica::RegsInternal& regs) const {
-    Pica::Shader::FSConfig config{regs};
-    config.ApplyProfile(profile);
-    return config;
+    return Pica::Shader::FSConfig{regs, profile};
 }
 
 void PipelineCache::QueryBlendEmulation(const Pica::RegsInternal& regs, bool& rgb_emulation,
