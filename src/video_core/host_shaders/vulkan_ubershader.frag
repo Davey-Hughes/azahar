@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #version 460
+#extension GL_EXT_control_flow_attributes : require
 
 // PICA fragment ubershader for the Vulkan backend. Used only while a draw's specialized shader
 // compiles; see RasterizerVulkan::Draw() in src/video_core/renderer_vulkan/vk_rasterizer.cpp.
@@ -751,7 +752,7 @@ void main() {
     g_alpha_results_2 = 0.0;
     g_alpha_results_3 = 0.0;
 
-    for (int i = 0; i < NUM_TEV_STAGES; ++i) {
+    [[dont_unroll]] for (int i = 0; i < NUM_TEV_STAGES; ++i) {
         write_tev_stage(i);
     }
 
