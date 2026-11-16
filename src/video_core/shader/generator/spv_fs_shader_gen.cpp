@@ -121,7 +121,9 @@ void FragmentModule::WriteDepth() {
             OpLoad(f32_id, OpAccessChain(input_pointer_id, gl_frag_coord_id, ConstU32(3u)))};
         depth = OpFDiv(f32_id, depth, gl_frag_coord_w);
     }
-    OpStore(gl_frag_depth_id, depth);
+    if (config.framebuffer.WritesDepth(profile)) {
+        OpStore(gl_frag_depth_id, depth);
+    }
 }
 
 void FragmentModule::WriteScissor() {
@@ -1520,15 +1522,21 @@ void FragmentModule::DefineEntryPoint() {
 
     boost::container::small_vector<Id, 11> interface_ids{
         primary_color_id, texcoord_id[0], texcoord_id[1], texcoord_id[2],   texcoord0_w_id,
-        normquat_id,      view_id,        color_id,       gl_frag_coord_id, gl_frag_depth_id,
+        normquat_id,      view_id,        color_id,       gl_frag_coord_id,
     };
+    const bool writes_depth = config.framebuffer.WritesDepth(profile);
+    if (writes_depth) {
+        interface_ids.push_back(gl_frag_depth_id);
+    }
     if (use_fragment_shader_barycentric) {
         interface_ids.push_back(gl_bary_coord_id);
     }
 
     AddEntryPoint(spv::ExecutionModel::Fragment, main_func, "main", interface_ids);
     AddExecutionMode(main_func, spv::ExecutionMode::OriginUpperLeft);
-    AddExecutionMode(main_func, spv::ExecutionMode::DepthReplacing);
+    if (writes_depth) {
+        AddExecutionMode(main_func, spv::ExecutionMode::DepthReplacing);
+    }
 }
 
 void FragmentModule::DefineUniformStructs() {
@@ -1613,9 +1621,11 @@ void FragmentModule::DefineInterface() {
 
     // Define built-ins
     gl_frag_coord_id = DefineVar(vec_ids.Get(4), spv::StorageClass::Input);
-    gl_frag_depth_id = DefineVar(f32_id, spv::StorageClass::Output);
     Decorate(gl_frag_coord_id, spv::Decoration::BuiltIn, spv::BuiltIn::FragCoord);
-    Decorate(gl_frag_depth_id, spv::Decoration::BuiltIn, spv::BuiltIn::FragDepth);
+    if (config.framebuffer.WritesDepth(profile)) {
+        gl_frag_depth_id = DefineVar(f32_id, spv::StorageClass::Output);
+        Decorate(gl_frag_depth_id, spv::Decoration::BuiltIn, spv::BuiltIn::FragDepth);
+    }
     if (use_fragment_shader_barycentric) {
         gl_bary_coord_id = DefineVar(vec_ids.Get(3), spv::StorageClass::Input);
         Decorate(gl_bary_coord_id, spv::Decoration::BuiltIn, spv::BuiltIn::BaryCoordKHR);

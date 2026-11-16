@@ -67,6 +67,12 @@ static_assert(std::has_unique_object_representations_v<BlendConfig>);
 struct FramebufferConfig {
     explicit FramebufferConfig(const Pica::RegsInternal& regs);
 
+    /// Whether the fragment shader has to write gl_FragDepth. A [-1, 1] depth range still needs
+    /// gl_FragCoord.z mapped back to [0, 1].
+    bool WritesDepth(const Profile& profile) const {
+        return !depth_identity || profile.has_minus_one_to_one_range;
+    }
+
     union {
         u32 raw{};
         BitField<0, 3, Pica::FramebufferRegs::CompareFunc> alpha_test_func;
@@ -75,6 +81,8 @@ struct FramebufferConfig {
         BitField<6, 4, Pica::FramebufferRegs::LogicOp> logic_op;
         BitField<10, 1, u32> shadow_rendering;
         BitField<11, 1, u32> alphablend_enable;
+        // Depth scale -1, offset 0 and no W-buffering: the rasterized depth is the PICA depth
+        BitField<12, 1, u32> depth_identity;
     };
     BlendConfig requested_rgb_blend{};
     BlendConfig requested_alpha_blend{};
@@ -94,7 +102,8 @@ struct FramebufferConfig {
             // fields
             FIELD_HASH(alpha_test_func), FIELD_HASH(scissor_test_mode), FIELD_HASH(depthmap_enable),
             FIELD_HASH(logic_op), FIELD_HASH(shadow_rendering), FIELD_HASH(alphablend_enable),
-            FIELD_HASH(requested_rgb_blend), FIELD_HASH(requested_alpha_blend),
+            FIELD_HASH(depth_identity), FIELD_HASH(requested_rgb_blend),
+            FIELD_HASH(requested_alpha_blend),
 
             // nested layout
             BlendConfig::StructHash());

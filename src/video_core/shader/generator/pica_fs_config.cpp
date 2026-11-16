@@ -6,10 +6,19 @@
 
 namespace Pica::Shader {
 
+// The fragment shader computes depth = -gl_FragCoord.z * scale + offset, which is
+// gl_FragCoord.z unchanged for scale -1 and offset 0.
+static bool IsDepthIdentity(const Pica::RegsInternal& regs) {
+    return regs.rasterizer.depthmap_enable != Pica::RasterizerRegs::DepthBuffering::WBuffering &&
+           Pica::f24::FromRaw(regs.rasterizer.viewport_depth_range).ToFloat32() == -1.f &&
+           Pica::f24::FromRaw(regs.rasterizer.viewport_depth_near_plane).ToFloat32() == 0.f;
+}
+
 FramebufferConfig::FramebufferConfig(const Pica::RegsInternal& regs) {
     const auto& output_merger = regs.framebuffer.output_merger;
     scissor_test_mode.Assign(regs.rasterizer.scissor_test.mode);
     depthmap_enable.Assign(regs.rasterizer.depthmap_enable);
+    depth_identity.Assign(IsDepthIdentity(regs));
     shadow_rendering.Assign(regs.framebuffer.IsShadowRendering());
     alpha_test_func.Assign(output_merger.alpha_test.enable
                                ? output_merger.alpha_test.func.Value()
