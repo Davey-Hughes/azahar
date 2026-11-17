@@ -2,6 +2,7 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <cstdlib>
 #include <map>
 #include <set>
 #include <string>
@@ -29,6 +30,19 @@ class DecompileFail : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
+
+/// A jump to an earlier label: the subroutine needs the jmp_to dispatcher loop.
+class BackwardJump {};
+
+/// PoC: AZAHAR_VS_PRUNE_BOOL_BRANCHES=1 leaves out the side of each IFU and CALLU that the bool
+/// uniforms rule out (the shader is specialized on them), so dead subroutines aren't generated.
+static bool PruneBoolBranches() {
+    static const bool prune = [] {
+        const char* env = std::getenv("AZAHAR_VS_PRUNE_BOOL_BRANCHES");
+        return env && env[0] == '1';
+    }();
+    return prune;
+}
 
 /// Evaluates a bool uniform test against the bool uniforms the shader is specialized on.
 static bool TestUniformBool(u16 bool_uniforms, u32 index, bool invert_test) {
@@ -218,8 +232,22 @@ private:
                 ExitMethod after_loop = Scan(instr.flow_control.dest_offset + 1, end, labels);
                 return exit_method = SeriesExit(loop.exit_method, after_loop);
             }
-            case OpCode::Id::CALLC:
-            case OpCode::Id::CALLU: {
+            case OpCode::Id::CALLU:
+                if (PruneBoolBranches()) {
+                    if (!TestUniformBool(bool_uniforms, instr.flow_control.bool_uniform_id,
+                                         false)) {
+                        break; // never called
+                    }
+                    auto& call = AddSubroutine(instr.flow_control.dest_offset,
+                                               instr.flow_control.dest_offset +
+                                                   instr.flow_control.num_instructions);
+                    if (call.exit_method == ExitMethod::AlwaysEnd)
+                        return exit_method = ExitMethod::AlwaysEnd;
+                    ExitMethod after_call = Scan(offset + 1, end, labels);
+                    return exit_method = SeriesExit(call.exit_method, after_call);
+                }
+                [[fallthrough]];
+            case OpCode::Id::CALLC: {
                 auto& call = AddSubroutine(instr.flow_control.dest_offset,
                                            instr.flow_control.dest_offset +
                                                instr.flow_control.num_instructions);
@@ -228,6 +256,27 @@ private:
                            ParallelExit(call.exit_method, ExitMethod::AlwaysReturn), after_call);
             }
             case OpCode::Id::IFU:
+                if (PruneBoolBranches()) {
+                    // Only the side the bool uniform selects
+                    ExitMethod taken = ExitMethod::AlwaysReturn;
+                    if (TestUniformBool(bool_uniforms, instr.flow_control.bool_uniform_id,
+                                        false)) {
+                        taken =
+                            AddSubroutine(offset + 1, instr.flow_control.dest_offset).exit_method;
+                    } else if (instr.flow_control.num_instructions != 0) {
+                        taken = AddSubroutine(instr.flow_control.dest_offset,
+                                              instr.flow_control.dest_offset +
+                                                  instr.flow_control.num_instructions)
+                                    .exit_method;
+                    }
+                    if (taken == ExitMethod::AlwaysEnd)
+                        return exit_method = ExitMethod::AlwaysEnd;
+                    ExitMethod after_if = Scan(
+                        instr.flow_control.dest_offset + instr.flow_control.num_instructions, end,
+                        labels);
+                    return exit_method = SeriesExit(taken, after_if);
+                }
+                [[fallthrough]];
             case OpCode::Id::IFC: {
                 auto& if_sub = AddSubroutine(offset + 1, instr.flow_control.dest_offset);
                 ExitMethod else_method;
@@ -276,6 +325,14 @@ public:
 
     std::string MoveResult() {
         return std::move(shader_source);
+    }
+
+    std::size_t Size() const {
+        return shader_source.size();
+    }
+
+    void Truncate(std::size_t size) {
+        shader_source.resize(size);
     }
 
     int scope = 0;
@@ -736,6 +793,17 @@ private:
                 if (!current_labels->contains(dest)) {
                     return dest;
                 }
+                if (structured) {
+                    // The rest of this label's code is unreachable, as after the break below
+                    if (dest <= offset) {
+                        throw BackwardJump{};
+                    }
+                    shader.AddLine("jmp_to = {}u;", dest);
+                    shader.AddLine("if (false) {{");
+                    ++shader.scope;
+                    ++open_jumps;
+                    break;
+                }
                 shader.AddLine("{{ jmp_to = {}u; break; }}", dest);
                 break;
             }
@@ -743,6 +811,19 @@ private:
             case OpCode::Id::JMPC: {
                 shader.AddLine("if ({}) {{", EvaluateCondition(instr.flow_control));
                 ++shader.scope;
+                if (structured) {
+                    // Skip ahead to the target: the rest of this label's code goes in the else
+                    const u32 dest = instr.flow_control.dest_offset;
+                    if (dest <= offset) {
+                        throw BackwardJump{};
+                    }
+                    shader.AddLine("jmp_to = {}u;", dest);
+                    --shader.scope;
+                    shader.AddLine("}} else {{");
+                    ++shader.scope;
+                    ++open_jumps;
+                    break;
+                }
                 shader.AddLine("{{ jmp_to = {}u; break; }}",
                                instr.flow_control.dest_offset.Value());
 
@@ -755,10 +836,19 @@ private:
             case OpCode::Id::CALLC:
             case OpCode::Id::CALLU: {
                 std::string condition;
+                bool unconditional = instr.opcode.Value() == OpCode::Id::CALL;
                 if (instr.opcode.Value() == OpCode::Id::CALLC) {
                     condition = EvaluateCondition(instr.flow_control);
                 } else if (instr.opcode.Value() == OpCode::Id::CALLU) {
-                    condition = GetUniformBool(instr.flow_control.bool_uniform_id);
+                    if (PruneBoolBranches()) {
+                        if (!TestUniformBool(bool_uniforms, instr.flow_control.bool_uniform_id,
+                                             false)) {
+                            break; // never called
+                        }
+                        unconditional = true;
+                    } else {
+                        condition = GetUniformBool(instr.flow_control.bool_uniform_id);
+                    }
                 }
 
                 if (condition.empty()) {
@@ -773,8 +863,7 @@ private:
                                                    instr.flow_control.num_instructions);
 
                 CallSubroutine(call_sub);
-                if (instr.opcode.Value() == OpCode::Id::CALL &&
-                    call_sub.exit_method == ExitMethod::AlwaysEnd) {
+                if (unconditional && call_sub.exit_method == ExitMethod::AlwaysEnd) {
                     offset = PROGRAM_END - 1;
                 }
 
@@ -789,6 +878,31 @@ private:
 
             case OpCode::Id::IFC:
             case OpCode::Id::IFU: {
+                if (instr.opcode.Value() == OpCode::Id::IFU && PruneBoolBranches()) {
+                    // Only the side the bool uniform selects, inline
+                    const u32 else_offset = instr.flow_control.dest_offset;
+                    const u32 endif_offset =
+                        instr.flow_control.dest_offset + instr.flow_control.num_instructions;
+                    const Subroutine* taken = nullptr;
+                    if (TestUniformBool(bool_uniforms, instr.flow_control.bool_uniform_id,
+                                        false)) {
+                        taken = &GetSubroutine(offset + 1, else_offset);
+                    } else if (instr.flow_control.num_instructions != 0) {
+                        taken = &GetSubroutine(else_offset, endif_offset);
+                    }
+                    offset = endif_offset - 1;
+                    if (taken) {
+                        shader.AddLine("{{");
+                        ++shader.scope;
+                        CallSubroutine(*taken);
+                        --shader.scope;
+                        shader.AddLine("}}");
+                        if (taken->exit_method == ExitMethod::AlwaysEnd) {
+                            offset = PROGRAM_END - 1;
+                        }
+                    }
+                    break;
+                }
                 std::string condition;
                 if (instr.opcode.Value() == OpCode::Id::IFC) {
                     condition = EvaluateCondition(instr.flow_control);
@@ -945,7 +1059,10 @@ private:
                 if (CompileRange(subroutine.begin, subroutine.end) != PROGRAM_END) {
                     shader.AddLine("return false;");
                 }
+            } else if (structured_jumps && GenerateStructured(subroutine, labels)) {
+                // Every jump in the subroutine goes forward: no dispatcher loop needed
             } else {
+                labels = subroutine.labels;
                 labels.insert(subroutine.begin);
                 shader.AddLine("uint jmp_to = {}u;", subroutine.begin);
                 shader.AddLine("while (true) {{");
@@ -987,6 +1104,53 @@ private:
         }
     }
 
+    /**
+     * PoC (AZAHAR_VS_STRUCTURED_JUMPS=1): compiles a subroutine whose jumps all go forward
+     * without the jmp_to dispatcher loop. Each label's code runs if jmp_to hasn't passed it, and
+     * a jump sets jmp_to to its target and skips the rest of its label's code with an else.
+     * The labels are visited in order, so a jump skips everything up to its target.
+     * @returns false (and writes nothing) if the subroutine jumps backward.
+     */
+    bool GenerateStructured(const Subroutine& subroutine, std::set<u32>& labels) {
+        const std::size_t start_size = shader.Size();
+        const int start_scope = shader.scope;
+        structured = true;
+        try {
+            labels.insert(subroutine.begin);
+            shader.AddLine("uint jmp_to = {}u;", subroutine.begin);
+            for (auto label : labels) {
+                shader.AddLine("if (jmp_to <= {}u) {{", label);
+                ++shader.scope;
+                open_jumps = 0;
+
+                auto next_it = labels.lower_bound(label + 1);
+                u32 next_label = next_it == labels.end() ? subroutine.end : *next_it;
+
+                u32 compile_end = CompileRange(label, next_label);
+                if (compile_end > next_label && compile_end != PROGRAM_END) {
+                    // A label inside an IF/LOOP block, or a followed JMPU, left the range
+                    shader.AddLine("jmp_to = {}u;", compile_end);
+                    labels.emplace(compile_end);
+                }
+
+                for (; open_jumps > 0; --open_jumps) {
+                    --shader.scope;
+                    shader.AddLine("}}");
+                }
+                --shader.scope;
+                shader.AddLine("}}");
+            }
+            shader.AddLine("return false;");
+        } catch (const BackwardJump&) {
+            shader.Truncate(start_size);
+            shader.scope = start_scope;
+            structured = false;
+            return false;
+        }
+        structured = false;
+        return true;
+    }
+
 private:
     const std::set<Subroutine>& subroutines;
     const ProgramCode& program_code;
@@ -999,6 +1163,16 @@ private:
 
     /// Labels of the subroutine being compiled
     const std::set<u32>* current_labels = nullptr;
+
+    /// PoC: AZAHAR_VS_STRUCTURED_JUMPS=1 tries GenerateStructured() for subroutines with labels
+    const bool structured_jumps = [] {
+        const char* env = std::getenv("AZAHAR_VS_STRUCTURED_JUMPS");
+        return env && env[0] == '1';
+    }();
+    /// Set while GenerateStructured() compiles a subroutine
+    bool structured = false;
+    /// Else blocks opened by jumps in the current label's code
+    int open_jumps = 0;
 
     ShaderWriter shader;
 };
