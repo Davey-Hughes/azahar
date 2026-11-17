@@ -74,6 +74,7 @@ static constexpr const char* dump_textures = citra_setting(BaseKeys::dump_textur
 static constexpr const char* shader_compilation = "citra_shader_compilation";
 static constexpr const char* fast_pipeline_linking = "citra_fast_pipeline_linking";
 static constexpr const char* fog_uniform = "citra_fog_uniform";
+static constexpr const char* lean_vertex_shaders = "citra_lean_vertex_shaders";
 } // namespace graphics
 
 namespace layout {
@@ -437,6 +438,23 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
             { "seen", "After First Fog Draw" },
             { "config", "Per Shader" },
             { "always", "Always" },
+            { nullptr, nullptr }
+        },
+        config::disabled
+    },
+    {
+        config::graphics::lean_vertex_shaders,
+        "Lean Vertex Shaders",
+        "Lean Vertex Shaders",
+        "Generate vertex shaders without the branches their bool uniforms rule out, and with "
+        "plain if/else blocks instead of a jump loop where the program only jumps forward. The "
+        "shaders compile faster (A Link Between Worlds, Super Mario 3D Land) and draw the same. "
+        "Restart RetroArch to apply.",
+        nullptr,
+        config::category::graphics,
+        {
+            { config::disabled, "Disabled" },
+            { config::enabled, "Enabled" },
             { nullptr, nullptr }
         },
         config::disabled
@@ -1167,6 +1185,12 @@ static void ParseGraphicsOptions(void) {
                                               : fog == "config" ? "config"
                                               : fog == "always" ? "1"
                                                                 : nullptr);
+
+        // Read by the vertex shader decompiler (glsl_shader_decompiler.cpp); unset = off.
+        const bool lean = LibRetro::FetchVariable(config::graphics::lean_vertex_shaders,
+                                                  config::disabled) == config::enabled;
+        SetPocSwitch("AZAHAR_VS_PRUNE_BOOL_BRANCHES", lean);
+        SetPocSwitch("AZAHAR_VS_STRUCTURED_JUMPS", lean);
     }
 
     auto resolution = LibRetro::FetchVariable(config::graphics::resolution_factor, "1");
