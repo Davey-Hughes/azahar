@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cstdlib>
 #include "common/hash.h"
 #include "video_core/pica/regs_internal.h"
 #include "video_core/shader/generator/profile.h"
@@ -285,6 +286,8 @@ struct LightConfig {
         BitField<20, 1, u32> shadow_invert;
         BitField<21, 1, u32> shadow_alpha;
         BitField<22, 2, u32> shadow_selector;
+        // Light loop: the key is in loop form (see MakeLoopKey()).
+        BitField<24, 1, u32> loop_form;
     };
     LutConfig lut_d0{};
     LutConfig lut_d1{};
@@ -295,8 +298,49 @@ struct LightConfig {
     LutConfig lut_rb{};
     std::array<Light, 8> lights{};
 
+    /// Light loop (see FSLightLoopEnabled()): the per-light settings come from uniform
+    /// data, so the key drops the light count and per-light bits. It keeps, in Light flag bit
+    /// positions, which flags are on for any light (lights[0]) and for all lights (lights[1]).
+    void MakeLoopKey() {
+        if (!enable || src_num < LoopMinLights()) {
+            return;
+        }
+        // The loop reads the k-th light from slot k, so only the identity permutation qualifies
+        // (661 of 665 lit lm2 configs); others keep the unrolled form.
+        for (u32 n = 0; n < src_num; ++n) {
+            if (lights[n].num != n) {
+                return;
+            }
+        }
+        constexpr u16 flag_mask = 0x3F8; // bits 3-9: directional ... shadow_enable
+        u16 any = 0;
+        u16 all = flag_mask;
+        for (u32 n = 0; n < src_num; ++n) {
+            any |= lights[n].raw & flag_mask;
+            all &= lights[n].raw & flag_mask;
+        }
+        lights = {};
+        lights[0].raw = any;
+        lights[1].raw = all;
+        src_num.Assign(0);
+        loop_form.Assign(1);
+    }
+
+    /// Light loop: configs with fewer lights stay unrolled (AZAHAR_FS_LIGHT_LOOP_MIN,
+    /// default 5). Below that a loop shader is no smaller, and in lm2 and Pokemon X no 1-4 light
+    /// keys merge, so it would only cost GPU time (session 23).
+    static u32 LoopMinLights() {
+        static const u32 min = [] {
+            const char* env = std::getenv("AZAHAR_FS_LIGHT_LOOP_MIN");
+            return env != nullptr && env[0] != '\0' ? static_cast<u32>(std::atoi(env)) : 5u;
+        }();
+        return min;
+    }
+
     static consteval u64 StructHash() {
-        constexpr u64 STRUCT_VERSION = 0;
+        // 1: loop_form (bit 24 of the first word, unused before), so caches written with or
+        // without the loop don't load into the other build.
+        constexpr u64 STRUCT_VERSION = 1;
 
         using T = LightConfig;
         return Common::HashCombine(
@@ -379,6 +423,16 @@ union UserConfig {
     }
 };
 static_assert(std::has_unique_object_representations_v<UserConfig>);
+
+/// Light loop: on unless AZAHAR_FS_LIGHT_LOOP=0 (read once, after the Android PoC toggles are
+/// imported, since the first FS config is built at the first draw).
+inline bool FSLightLoopEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("AZAHAR_FS_LIGHT_LOOP");
+        return env == nullptr || env[0] != '0';
+    }();
+    return enabled;
+}
 
 struct FSConfig {
     // Applies the profile, so draws that generate the same shader share a key.

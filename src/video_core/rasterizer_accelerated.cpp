@@ -279,4 +279,44 @@ void RasterizerAccelerated::SyncDrawUniforms() {
     pica.dirty_regs.Reset();
 }
 
+void RasterizerAccelerated::SyncLightLoopInfo() {
+    const auto& lighting = regs.lighting;
+    std::array<std::array<s32, 3>, 8> info{};
+    if (!lighting.disable) {
+        const u32 count = lighting.max_light_index + 1;
+        const auto lut_offset = [&](Pica::LightingRegs::LightingSampler sampler, u32 num) {
+            const u32 index = static_cast<u32>(sampler) + num;
+            return fs_data.lighting_lut_offset[index / 4][index % 4];
+        };
+        for (u32 k = 0; k < count; ++k) {
+            const u32 num = lighting.light_enable.GetNum(k);
+            const auto& light = lighting.light[num];
+            u32 flags = num;
+            flags |= (light.config.directional != 0 ? 1u : 0u) << 3;
+            flags |= (light.config.two_sided_diffuse != 0 ? 1u : 0u) << 4;
+            flags |= (!lighting.IsDistAttenDisabled(num) ? 1u : 0u) << 5;
+            flags |= (!lighting.IsSpotAttenDisabled(num) ? 1u : 0u) << 6;
+            flags |= (light.config.geometric_factor_0 != 0 ? 1u : 0u) << 7;
+            flags |= (light.config.geometric_factor_1 != 0 ? 1u : 0u) << 8;
+            flags |= (!lighting.IsShadowDisabled(num) ? 1u : 0u) << 9;
+            if (k == 0) {
+                flags |= count << 16;
+            }
+            info[k] = {static_cast<s32>(flags),
+                       lut_offset(Pica::LightingRegs::LightingSampler::SpotlightAttenuation, num),
+                       lut_offset(Pica::LightingRegs::LightingSampler::DistanceAttenuation, num)};
+        }
+    }
+    for (u32 k = 0; k < 8; ++k) {
+        auto& src = fs_data.light_src[k];
+        if (src.loop_info != info[k][0] || src.loop_spot_lut_offset != info[k][1] ||
+            src.loop_dist_lut_offset != info[k][2]) {
+            src.loop_info = info[k][0];
+            src.loop_spot_lut_offset = info[k][1];
+            src.loop_dist_lut_offset = info[k][2];
+            fs_data_dirty = true;
+        }
+    }
+}
+
 } // namespace VideoCore

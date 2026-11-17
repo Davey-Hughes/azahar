@@ -35,6 +35,9 @@ protected:
     /// Sync vertex and framgent uniforms from PICA registers
     void SyncDrawUniforms();
 
+    /// Light loop: per-light loop info, after the lighting LUT offsets are known.
+    void SyncLightLoopInfo();
+
 protected:
     /// Structure that the hardware rendered vertices are composed of
     struct HardwareVertex {

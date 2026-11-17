@@ -20,7 +20,8 @@ constexpr u32 SPIRV_VERSION_1_3 = 0x00010300;
 FragmentModule::FragmentModule(const FSConfig& config_, const Profile& profile_)
     : Sirit::Module{SPIRV_VERSION_1_3}, config{config_}, profile{profile_},
       use_fragment_shader_barycentric{profile.has_fragment_shader_barycentric &&
-                                      config.lighting.enable} {
+                                      config.lighting.enable},
+      use_light_loop{config.lighting.enable && config.lighting.loop_form} {
     config.ApplyProfile(profile_);
     DefineArithmeticTypes();
     DefineUniformStructs();
@@ -35,6 +36,15 @@ FragmentModule::~FragmentModule() = default;
 
 void FragmentModule::Generate() {
     AddLabel(OpLabel());
+    if (use_light_loop) {
+        // Function variables must be declared in the first block.
+        light_i_var = AddLocalVariable(TypePointer(spv::StorageClass::Function, i32_id),
+                                       spv::StorageClass::Function);
+        light_diffuse_var = AddLocalVariable(
+            TypePointer(spv::StorageClass::Function, vec_ids.Get(4)), spv::StorageClass::Function);
+        light_specular_var = AddLocalVariable(
+            TypePointer(spv::StorageClass::Function, vec_ids.Get(4)), spv::StorageClass::Function);
+    }
 
     rounded_primary_color = Byteround(OpLoad(vec_ids.Get(4), primary_color_id), 4);
     primary_fragment_color = ConstF32(0.f, 0.f, 0.f, 0.f);
@@ -357,8 +367,7 @@ void FragmentModule::WriteLighting() {
 
     // Samples the specified lookup table for specular lighting
     const Id view{OpLoad(vec_ids.Get(3), view_id)};
-    const auto get_lut_value = [&](LightingRegs::LightingSampler sampler, u32 light_num,
-                                   LightingRegs::LightingLutInput input, bool abs) -> Id {
+    const auto lut_input_index = [&](LightingRegs::LightingLutInput input) -> Id {
         Id index{};
         switch (input) {
         case LightingRegs::LightingLutInput::NH:
@@ -403,7 +412,11 @@ void FragmentModule::WriteLighting() {
             index = ConstF32(0.f);
             break;
         }
-
+        return index;
+    };
+    const auto get_lut_value = [&](LightingRegs::LightingSampler sampler, u32 light_num,
+                                   LightingRegs::LightingLutInput input, bool abs) -> Id {
+        Id index{lut_input_index(input)};
         const Id sampler_index{ConstU32(static_cast<u32>(sampler))};
         if (abs) {
             // LUT index is in the range of (0.0, 1.0)
@@ -417,8 +430,290 @@ void FragmentModule::WriteLighting() {
         }
     };
 
+    if (use_light_loop) {
+        // One loop over the enabled lights. Iteration k reads light_src[k]: its light data and,
+        // in its padding (RasterizerAccelerated::SyncLightLoopInfo()), loop_info = Light flags
+        // (bits 3-9), entry 0 also the light count (bits 16-19), then the spot and distance
+        // attenuation LUT offsets. The key (LightConfig::MakeLoopKey()) keeps, per flag, whether
+        // it is on for any / all lights, and only has the identity light permutation.
+        if (!Sirit::ValidId(texture_buffer_lut_lf)) {
+            // Loaded here so the load dominates every lookup inside the loop.
+            texture_buffer_lut_lf = OpLoad(image_buffer_id, texture_buffer_lut_lf_id);
+        }
+        enum class Tri { Off, On, Mixed };
+        const auto tri = [&](u32 bit) {
+            const bool any_on = (lighting.lights[0].raw >> bit) & 1;
+            const bool all_on = (lighting.lights[1].raw >> bit) & 1;
+            return all_on ? Tri::On : (any_on ? Tri::Mixed : Tri::Off);
+        };
+        const Id vec3{vec_ids.Get(3)};
+        const Id vec4{vec_ids.Get(4)};
+        const auto lookup_at = [&](Id lut_offset, Id pos) -> Id { // unsigned input, 256 entries
+            const Id pos_floor{OpFloor(f32_id, OpFMul(f32_id, pos, ConstF32(256.f)))};
+            const Id index{
+                OpConvertFToS(i32_id, OpFClamp(f32_id, pos_floor, ConstF32(0.f), ConstF32(255.f)))};
+            const Id delta{
+                OpFma(f32_id, pos, ConstF32(256.f), OpFNegate(f32_id, OpConvertSToF(f32_id, index)))};
+            const Id entry{OpImageFetch(vec4, texture_buffer_lut_lf, OpIAdd(i32_id, lut_offset, index))};
+            return OpFma(f32_id, OpCompositeExtract(f32_id, entry, 1), delta,
+                         OpCompositeExtract(f32_id, entry, 0));
+        };
+        const auto lookup_signed_at = [&](Id lut_offset, Id pos) -> Id {
+            const Id pos_floor{OpFloor(f32_id, OpFMul(f32_id, pos, ConstF32(128.f)))};
+            const Id index{OpConvertFToS(
+                i32_id, OpFClamp(f32_id, pos_floor, ConstF32(-128.f), ConstF32(127.f)))};
+            const Id delta{
+                OpFma(f32_id, pos, ConstF32(128.f), OpFNegate(f32_id, OpConvertSToF(f32_id, index)))};
+            const Id increment{OpSelect(i32_id, OpSLessThan(bool_id, index, ConstS32(0)),
+                                        ConstS32(256), ConstS32(0))};
+            const Id entry{OpImageFetch(vec4, texture_buffer_lut_lf,
+                                        OpIAdd(i32_id, lut_offset, OpIAdd(i32_id, index, increment)))};
+            return OpFma(f32_id, OpCompositeExtract(f32_id, entry, 1), delta,
+                         OpCompositeExtract(f32_id, entry, 0));
+        };
+
+        OpStore(light_diffuse_var, diffuse_sum);
+        OpStore(light_specular_var, specular_sum);
+        const Id light_count{OpBitwiseAnd(
+            i32_id,
+            OpShiftRightArithmetic(i32_id,
+                                   GetShaderDataMember(i32_id, ConstS32(24), ConstS32(0),
+                                                       ConstS32(8)),
+                                   ConstS32(16)),
+            ConstS32(0xF))};
+        // light_i_var holds the lights still to do, one bit per light. A bitmask walk hides the
+        // trip count: the stock Adreno compiler copies a counted loop's body ~4x despite
+        // DontUnroll, this one ~2x (session 24).
+        OpStore(light_i_var, OpISub(i32_id, OpShiftLeftLogical(i32_id, ConstS32(1), light_count),
+                                    ConstS32(1)));
+        const Id normalized_view{OpNormalize(vec3, view)};
+        const Id shadow_rgb{OpVectorShuffle(vec3, shadow, shadow, 0, 1, 2)};
+        const Tri directional{tri(3)}, two_sided{tri(4)}, dist_on{tri(5)}, spot_on{tri(6)},
+            geo_0{tri(7)}, geo_1{tri(8)}, shadow_on{tri(9)};
+
+        // Loop-form keys have the identity light permutation (LightConfig::MakeLoopKey()), so the
+        // k-th light is slot k: one index for its loop info and its light data. Callers mask the
+        // index to 3 bits so the compiler sees it's small (a single 16-bit multiply).
+        const auto info_member = [&](Id index, s32 component) {
+            return GetShaderDataMember(i32_id, ConstS32(24), index, ConstS32(8 + component));
+        };
+        const auto light_member = [&](Id index, s32 member) -> Id {
+            const Id member_type = member < 6 ? vec3 : f32_id;
+            return GetShaderDataMember(member_type, ConstS32(24), index, ConstS32(member));
+        };
+        const auto flag = [&](Id info, u32 bit) {
+            return OpINotEqual(bool_id, OpBitwiseAnd(i32_id, info, ConstS32(1 << bit)),
+                               ConstS32(0));
+        };
+        // Exact per-light choice (an arithmetic blend v + f * (s - v) is off by rounding).
+        const auto select_if = [&](Id info, Id type, u32 bit, Id when_set, Id otherwise) -> Id {
+            const Id cond{flag(info, bit)};
+            const Id cond_v{type.value == vec3.value
+                                ? OpCompositeConstruct(bvec_ids.Get(3), cond, cond, cond)
+                                : cond};
+            return OpSelect(type, cond_v, when_set, otherwise);
+        };
+        const auto abs_or_max = [&](Id info, Id x) -> Id {
+            switch (two_sided) {
+            case Tri::On:
+                return OpFAbs(f32_id, x);
+            case Tri::Off:
+                return OpFMax(f32_id, x, ConstF32(0.f));
+            default:
+                return OpSelect(f32_id, flag(info, 4), OpFAbs(f32_id, x),
+                                OpFMax(f32_id, x, ConstF32(0.f)));
+            }
+        };
+        const auto lut_value = [&](Id info, LightingRegs::LightingSampler sampler,
+                                   LightingRegs::LightingLutInput input, bool abs) -> Id {
+            Id index{lut_input_index(input)};
+            const Id sampler_index{ConstU32(static_cast<u32>(sampler))};
+            if (abs) {
+                return lookup_lighting_lut_unsigned(sampler_index, abs_or_max(info, index));
+            }
+            return lookup_lighting_lut_signed(sampler_index, index);
+        };
+        // Multiplies v by factor where the flag holds (Tri) / is set for this light (Mixed).
+        const auto apply_if = [&](Id info, Tri t, u32 bit, Id type, Id v, auto&& scaled) -> Id {
+            if (t == Tri::Off) {
+                return v;
+            }
+            const Id s{scaled()};
+            if (t == Tri::On) {
+                return s;
+            }
+            return select_if(info, type, bit, s, v);
+        };
+        // Sets light_vector, spot_dir and half_vector for the light; returns its distance.
+        const auto set_light_vectors = [&](Id index, Id info) -> Id {
+            const Id light_position{light_member(index, 4)};
+            switch (directional) {
+            case Tri::On:
+                light_vector = light_position;
+                break;
+            case Tri::Off:
+                light_vector = OpFAdd(vec3, light_position, view);
+                break;
+            default:
+                light_vector = select_if(info, vec3, 3, light_position,
+                                         OpFAdd(vec3, light_position, view));
+                break;
+            }
+            const Id distance{OpLength(f32_id, light_vector)};
+            light_vector = OpNormalize(vec3, light_vector);
+            spot_dir = light_member(index, 5);
+            half_vector = OpFAdd(vec3, normalized_view, light_vector);
+            return distance;
+        };
+        const auto global_lut = [&](Id info, const LutConfig& lut,
+                                    LightingRegs::LightingSampler sampler, Id otherwise) -> Id {
+            if (!lut.enable || !LightingRegs::IsLightingSamplerSupported(lighting.config, sampler)) {
+                return otherwise;
+            }
+            return OpFMul(f32_id, ConstF32(lut.GetScale()),
+                          lut_value(info, sampler, lut.type, lut.abs_input));
+        };
+        // One light's diffuse and specular contribution (rgb, alpha 0). Straight-line code: a
+        // mixed flag picks its result with a select, so the loop body is one block; branches cost
+        // ir3 an address-register reload per block and leave the lookups' latency unfilled.
+        const auto emit_light = [&](Id index) -> std::pair<Id, Id> {
+            const Id info{info_member(index, 0)};
+            const Id light_distance{set_light_vectors(index, info)};
+            const Id dot_product{abs_or_max(info, OpDot(f32_id, light_vector, normal))};
+            const Id clamp_highlights{lighting.clamp_highlights ? OpFSign(f32_id, dot_product)
+                                                                : ConstF32(1.f)};
+
+            Id spot_atten{ConstF32(1.f)};
+            if (spot_on != Tri::Off &&
+                LightingRegs::IsLightingSamplerSupported(
+                    lighting.config, LightingRegs::LightingSampler::SpotlightAttenuation)) {
+                const Id input{lut_input_index(lighting.lut_sp.type)};
+                const Id offset{info_member(index, 1)};
+                const Id value{lighting.lut_sp.abs_input
+                                   ? lookup_at(offset, abs_or_max(info, input))
+                                   : lookup_signed_at(offset, input)};
+                spot_atten = OpFMul(f32_id, ConstF32(lighting.lut_sp.GetScale()), value);
+                if (spot_on == Tri::Mixed) {
+                    spot_atten = OpSelect(f32_id, flag(info, 6), spot_atten, ConstF32(1.f));
+                }
+            }
+
+            Id dist_atten{ConstF32(1.f)};
+            if (dist_on != Tri::Off) {
+                const Id input{OpFma(f32_id, light_member(index, 7), light_distance,
+                                     light_member(index, 6))};
+                dist_atten = lookup_at(info_member(index, 2),
+                                       OpFClamp(f32_id, input, ConstF32(0.f), ConstF32(1.f)));
+                if (dist_on == Tri::Mixed) {
+                    dist_atten = OpSelect(f32_id, flag(info, 5), dist_atten, ConstF32(1.f));
+                }
+            }
+
+            Id geo_factor{ConstF32(1.f)};
+            if (geo_0 != Tri::Off || geo_1 != Tri::Off) {
+                const Id geo_dot{OpDot(f32_id, half_vector, half_vector)};
+                geo_factor = OpSelect(
+                    f32_id, OpFOrdEqual(bool_id, geo_dot, ConstF32(0.f)), ConstF32(0.f),
+                    OpFMin(f32_id, OpFDiv(f32_id, dot_product, geo_dot), ConstF32(1.f)));
+            }
+
+            const Id d0_lut_value{global_lut(info, lighting.lut_d0,
+                                             LightingRegs::LightingSampler::Distribution0,
+                                             ConstF32(1.f))};
+            Id specular_0{OpVectorTimesScalar(vec3, light_member(index, 0), d0_lut_value)};
+            specular_0 = apply_if(info, geo_0, 7, vec3, specular_0,
+                                  [&] { return OpVectorTimesScalar(vec3, specular_0, geo_factor); });
+            const Id refl_value_r{global_lut(info, lighting.lut_rr,
+                                             LightingRegs::LightingSampler::ReflectRed,
+                                             ConstF32(1.f))};
+            const Id refl_value_g{global_lut(info, lighting.lut_rg,
+                                             LightingRegs::LightingSampler::ReflectGreen,
+                                             refl_value_r)};
+            const Id refl_value_b{global_lut(info, lighting.lut_rb,
+                                             LightingRegs::LightingSampler::ReflectBlue,
+                                             refl_value_r)};
+            const Id d1_lut_value{global_lut(info, lighting.lut_d1,
+                                             LightingRegs::LightingSampler::Distribution1,
+                                             ConstF32(1.f))};
+            const Id refl_value{
+                OpCompositeConstruct(vec3, refl_value_r, refl_value_g, refl_value_b)};
+            Id specular_1{OpFMul(vec3, OpVectorTimesScalar(vec3, refl_value, d1_lut_value),
+                                 light_member(index, 1))};
+            specular_1 = apply_if(info, geo_1, 8, vec3, specular_1,
+                                  [&] { return OpVectorTimesScalar(vec3, specular_1, geo_factor); });
+
+            Id diffuse_mul_dot{OpVectorTimesScalar(vec3, light_member(index, 2), dot_product)};
+            if (lighting.shadow_primary) {
+                diffuse_mul_dot = apply_if(info, shadow_on, 9, vec3, diffuse_mul_dot,
+                                           [&] { return OpFMul(vec3, diffuse_mul_dot, shadow_rgb); });
+            }
+            Id diffuse_rgb{OpFAdd(vec3, diffuse_mul_dot, light_member(index, 3))};
+            diffuse_rgb = OpVectorTimesScalar(vec3, diffuse_rgb, dist_atten);
+            diffuse_rgb = OpVectorTimesScalar(vec3, diffuse_rgb, spot_atten);
+            Id specular_rgb{OpVectorTimesScalar(vec3, OpFAdd(vec3, specular_0, specular_1),
+                                                clamp_highlights)};
+            specular_rgb = OpVectorTimesScalar(vec3, specular_rgb, dist_atten);
+            specular_rgb = OpVectorTimesScalar(vec3, specular_rgb, spot_atten);
+            if (lighting.shadow_secondary) {
+                specular_rgb = apply_if(info, shadow_on, 9, vec3, specular_rgb,
+                                        [&] { return OpFMul(vec3, specular_rgb, shadow_rgb); });
+            }
+            return {PadVectorF32(diffuse_rgb, vec4, 0.f), PadVectorF32(specular_rgb, vec4, 0.f)};
+        };
+
+        const Id loop_header{OpLabel()};
+        const Id loop_body{OpLabel()};
+        const Id loop_continue{OpLabel()};
+        const Id loop_merge{OpLabel()};
+        OpBranch(loop_header);
+        AddLabel(loop_header);
+        const Id i{OpLoad(i32_id, light_i_var)};
+        const Id in_range{OpINotEqual(bool_id, i, ConstS32(0))};
+        OpLoopMerge(loop_merge, loop_continue, spv::LoopControlMask::DontUnroll);
+        OpBranchConditional(in_range, loop_body, loop_merge);
+        AddLabel(loop_body);
+
+        // One light per iteration: two (tried in session 23) cut ~7% of the executed cycles for
+        // even light counts, cost more for odd ones and ~30% more compile work.
+        const Id light_index{OpFindILsb(i32_id, i)};
+        const auto [diffuse, specular] = emit_light(OpBitwiseAnd(i32_id, light_index, ConstS32(7)));
+        const Id diffuse_acc{OpFAdd(vec4, OpLoad(vec4, light_diffuse_var), diffuse)};
+        const Id specular_acc{OpFAdd(vec4, OpLoad(vec4, light_specular_var), specular)};
+        OpStore(light_diffuse_var, diffuse_acc);
+        OpStore(light_specular_var, specular_acc);
+        OpBranch(loop_continue);
+
+        AddLabel(loop_continue);
+        OpStore(light_i_var, OpBitwiseAnd(i32_id, i, OpISub(i32_id, i, ConstS32(1))));
+        OpBranch(loop_header);
+
+        AddLabel(loop_merge);
+        diffuse_sum = OpLoad(vec4, light_diffuse_var);
+        specular_sum = OpLoad(vec4, light_specular_var);
+
+        // Fresnel: only the last light applies it, as the alpha of the sums (the lights add 0 to
+        // alpha), so it's computed once after the loop from the last light's vectors.
+        if (lighting.lut_fr.enable &&
+            LightingRegs::IsLightingSamplerSupported(lighting.config,
+                                                     LightingRegs::LightingSampler::Fresnel) &&
+            (lighting.enable_primary_alpha || lighting.enable_secondary_alpha)) {
+            const Id last{OpBitwiseAnd(i32_id, OpISub(i32_id, light_count, ConstS32(1)),
+                                       ConstS32(7))};
+            const Id info{info_member(last, 0)};
+            set_light_vectors(last, info);
+            const Id fresnel{OpFMul(f32_id, ConstF32(lighting.lut_fr.GetScale()),
+                                    lut_value(info, LightingRegs::LightingSampler::Fresnel,
+                                              lighting.lut_fr.type, lighting.lut_fr.abs_input))};
+            if (lighting.enable_primary_alpha) {
+                diffuse_sum = OpCompositeInsert(vec4, fresnel, diffuse_sum, 3);
+            }
+            if (lighting.enable_secondary_alpha) {
+                specular_sum = OpCompositeInsert(vec4, fresnel, specular_sum, 3);
+            }
+        }
+    }
     // Write the code to emulate each enabled light
-    for (u32 light_index = 0; light_index < lighting.src_num; ++light_index) {
+    for (u32 light_index = 0; !use_light_loop && light_index < lighting.src_num; ++light_index) {
         const auto& light_config = lighting.lights[light_index];
 
         const auto GetLightMember = [&](s32 member) -> Id {
@@ -1540,9 +1835,12 @@ void FragmentModule::DefineEntryPoint() {
 }
 
 void FragmentModule::DefineUniformStructs() {
-    const Id light_src_struct_id{TypeStruct(vec_ids.Get(3), vec_ids.Get(3), vec_ids.Get(3),
-                                            vec_ids.Get(3), vec_ids.Get(3), vec_ids.Get(3), f32_id,
-                                            f32_id)};
+    const Id light_src_struct_id{
+        use_light_loop
+            ? TypeStruct(vec_ids.Get(3), vec_ids.Get(3), vec_ids.Get(3), vec_ids.Get(3),
+                         vec_ids.Get(3), vec_ids.Get(3), f32_id, f32_id, i32_id, i32_id, i32_id)
+            : TypeStruct(vec_ids.Get(3), vec_ids.Get(3), vec_ids.Get(3), vec_ids.Get(3),
+                         vec_ids.Get(3), vec_ids.Get(3), f32_id, f32_id)};
 
     const Id light_src_array_id{TypeArray(light_src_struct_id, ConstU32(NUM_LIGHTS))};
     const Id lighting_lut_array_id{TypeArray(ivec_ids.Get(4), ConstU32(NUM_LIGHTING_SAMPLERS / 4))};
@@ -1567,6 +1865,12 @@ void FragmentModule::DefineUniformStructs() {
     Decorate(border_color_array_id, spv::Decoration::ArrayStride, 16u);
     for (u32 i = 0; i < static_cast<u32>(light_src_offsets.size()); i++) {
         MemberDecorate(light_src_struct_id, i, spv::Decoration::Offset, light_src_offsets[i]);
+    }
+    if (use_light_loop) {
+        // Light loop: flags, spot LUT offset, dist LUT offset in the struct's padding (100-111).
+        MemberDecorate(light_src_struct_id, 8, spv::Decoration::Offset, 100u);
+        MemberDecorate(light_src_struct_id, 9, spv::Decoration::Offset, 104u);
+        MemberDecorate(light_src_struct_id, 10, spv::Decoration::Offset, 108u);
     }
     for (u32 i = 0; i < static_cast<u32>(shader_data_offsets.size()); i++) {
         MemberDecorate(shader_data_struct_id, i, spv::Decoration::Offset, shader_data_offsets[i]);

@@ -1338,6 +1338,9 @@ void RasterizerVulkan::SyncAndUploadLUTs() {
 }
 
 void RasterizerVulkan::UploadUniforms(bool accelerate_draw) {
+    if (Pica::Shader::FSLightLoopEnabled()) {
+        SyncLightLoopInfo();
+    }
     const bool sync_vs_pica = accelerate_draw && pica.vs_setup.uniforms_dirty;
     if (!sync_vs_pica && !vs_data_dirty && !fs_data_dirty) {
         return;

@@ -23,7 +23,15 @@ struct LightSrc {
     alignas(16) Common::Vec3f spot_direction; // negated
     f32 dist_atten_bias;
     f32 dist_atten_scale;
+    // Light loop (FSLightLoopEnabled()), in the padding: entry k describes the k-th
+    // enabled light (= slot k for the loop, which only takes the identity permutation).
+    // loop_info = slot (bits 0-2) | Light flags (bits 3-9); entry 0 also holds the light count in
+    // bits 16-19.
+    s32 loop_info;
+    s32 loop_spot_lut_offset;
+    s32 loop_dist_lut_offset;
 };
+static_assert(sizeof(LightSrc) == 112);
 
 /**
  * Uniform structure for the Uniform Buffer Object, all vectors must be 16-byte aligned

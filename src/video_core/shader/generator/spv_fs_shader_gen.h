@@ -224,6 +224,12 @@ private:
     const Profile& profile;
 
     bool use_fragment_shader_barycentric{};
+    // Light loop (FSLightLoopEnabled()): lights in a runtime loop instead of unrolled per light,
+    // with the per-light settings read from shader data instead of the FS key.
+    bool use_light_loop{};
+    Id light_i_var{};
+    Id light_diffuse_var{};
+    Id light_specular_var{};
 
     Id void_id{};
     Id bool_id{};

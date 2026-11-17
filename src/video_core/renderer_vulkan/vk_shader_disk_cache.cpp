@@ -204,7 +204,11 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseProgrammableVer
 std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseFragmentShader(
     const Pica::RegsInternal& regs, const Pica::Shader::UserConfig& user) {
 
-    const FSConfig fs_config{regs, parent.profile};
+    FSConfig fs_config{regs, parent.profile};
+    if (Pica::Shader::FSLightLoopEnabled() && parent.profile.vk_use_spirv_generator &&
+        !fs_config.UsesSpirvIncompatibleConfig()) {
+        fs_config.lighting.MakeLoopKey();
+    }
     const auto fs_config_hash = fs_config.Hash();
     const auto [it, new_shader] = fragment_shaders.try_emplace(fs_config_hash, parent.instance);
     auto& shader = it->second;
