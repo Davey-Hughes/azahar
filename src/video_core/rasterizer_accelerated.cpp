@@ -160,6 +160,16 @@ void RasterizerAccelerated::SyncDrawUniforms() {
     const bool prev_flipped = std::exchange(vs_data.flip_viewport, is_flipped);
     vs_data_dirty |= is_flipped != prev_flipped;
 
+    // Fog as a uniform branch (Pica::Shader::FSFogUniformEnabled()); compared every draw like the
+    // flip bit, since no dirty check covers GPUREG_TEXENV_UPDATE_BUFFER.
+    if (Pica::Shader::FSFogUniformEnabled()) {
+        const auto& texturing = regs.texturing;
+        const int fog_flags =
+            (texturing.fog_mode == Pica::TexturingRegs::FogMode::Fog ? 1 : 0) |
+            (texturing.fog_flip != 0 ? 2 : 0);
+        fs_data_dirty |= std::exchange(fs_data.fog_flags, fog_flags) != fog_flags;
+    }
+
     // Sync clip plane uniforms
     if (dirty.CheckClipping()) {
         const auto raw_clip_coef = regs.rasterizer.GetClipCoef();

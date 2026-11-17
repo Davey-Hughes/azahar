@@ -21,7 +21,8 @@ FragmentModule::FragmentModule(const FSConfig& config_, const Profile& profile_)
     : Sirit::Module{SPIRV_VERSION_1_3}, config{config_}, profile{profile_},
       use_fragment_shader_barycentric{profile.has_fragment_shader_barycentric &&
                                       config.lighting.enable},
-      use_light_loop{config.lighting.enable && config.lighting.loop_form} {
+      use_light_loop{config.lighting.enable && config.lighting.loop_form},
+      use_uniform_fog{config.texture.fog_uniform != 0} {
     config.ApplyProfile(profile_);
     DefineArithmeticTypes();
     DefineUniformStructs();
@@ -65,7 +66,7 @@ void FragmentModule::Generate() {
     WriteLighting();
 
     combiner_buffer = ConstF32(0.f, 0.f, 0.f, 0.f);
-    next_combiner_buffer = GetShaderDataMember(vec_ids.Get(4), ConstS32(26));
+    next_combiner_buffer = GetShaderDataMember(vec_ids.Get(4), DataMember(26));
     combiner_output = ConstF32(0.f, 0.f, 0.f, 0.f);
 
     // Write shader bytecode to emulate PICA TEV stages
@@ -76,6 +77,9 @@ void FragmentModule::Generate() {
     WriteAlphaTestCondition(config.framebuffer.alpha_test_func);
 
     // Emulate the fog
+    if (use_uniform_fog) {
+        WriteUniformFog();
+    }
     switch (config.texture.fog_mode) {
     case TexturingRegs::FogMode::Fog:
         WriteFog();
@@ -123,8 +127,8 @@ void FragmentModule::WriteDepth() {
     const Id gl_frag_coord_z{
         OpLoad(f32_id, OpAccessChain(input_pointer_id, gl_frag_coord_id, ConstU32(2u)))};
     const Id z_over_w{OpFNegate(f32_id, gl_frag_coord_z)};
-    const Id depth_scale{GetShaderDataMember(f32_id, ConstS32(2))};
-    const Id depth_offset{GetShaderDataMember(f32_id, ConstS32(3))};
+    const Id depth_scale{GetShaderDataMember(f32_id, DataMember(2))};
+    const Id depth_offset{GetShaderDataMember(f32_id, DataMember(3))};
     depth = OpFma(f32_id, z_over_w, depth_scale, depth_offset);
     if (config.framebuffer.depthmap_enable == Pica::RasterizerRegs::DepthBuffering::WBuffering) {
         const Id gl_frag_coord_w{
@@ -144,13 +148,13 @@ void FragmentModule::WriteScissor() {
     const Id gl_frag_coord{OpLoad(vec_ids.Get(4), gl_frag_coord_id)};
     const Id gl_frag_coord_xy{OpVectorShuffle(vec_ids.Get(2), gl_frag_coord, gl_frag_coord, 0, 1)};
 
-    const Id scissor_x1{GetShaderDataMember(i32_id, ConstS32(6))};
-    const Id scissor_y1{GetShaderDataMember(i32_id, ConstS32(7))};
+    const Id scissor_x1{GetShaderDataMember(i32_id, DataMember(6))};
+    const Id scissor_y1{GetShaderDataMember(i32_id, DataMember(7))};
     const Id scissor_1{OpCompositeConstruct(vec_ids.Get(2), OpConvertSToF(f32_id, scissor_x1),
                                             OpConvertSToF(f32_id, scissor_y1))};
 
-    const Id scissor_x2{GetShaderDataMember(i32_id, ConstS32(8))};
-    const Id scissor_y2{GetShaderDataMember(i32_id, ConstS32(9))};
+    const Id scissor_x2{GetShaderDataMember(i32_id, DataMember(8))};
+    const Id scissor_y2{GetShaderDataMember(i32_id, DataMember(9))};
     const Id scissor_2{OpCompositeConstruct(vec_ids.Get(2), OpConvertSToF(f32_id, scissor_x2),
                                             OpConvertSToF(f32_id, scissor_y2))};
 
@@ -181,11 +185,46 @@ void FragmentModule::WriteFog() {
     } else {
         fog_index = OpFMul(f32_id, depth, ConstF32(128.f));
     }
+    ApplyFog(fog_index);
+}
 
+void FragmentModule::WriteUniformFog() {
+    // FSConfig::MakeRuntimeStateKey() left fog_mode and fog_flip out of the key.
+    const Id fog_flags{GetShaderDataMember(i32_id, ConstS32(static_cast<s32>(fog_flags_member)))};
+    const Id fog_on{
+        OpINotEqual(bool_id, OpBitwiseAnd(i32_id, fog_flags, ConstS32(1)), ConstS32(0))};
+    if (!Sirit::ValidId(texture_buffer_lut_lf)) {
+        // Outside the branch, so the load dominates any later use.
+        texture_buffer_lut_lf = OpLoad(image_buffer_id, texture_buffer_lut_lf_id);
+    }
+    const Id unfogged{combiner_output};
+    const Id fog_label{OpLabel()};
+    const Id no_fog_label{OpLabel()};
+    const Id end_label{OpLabel()};
+    OpSelectionMerge(end_label, spv::SelectionControlMask::MaskNone);
+    OpBranchConditional(fog_on, fog_label, no_fog_label);
+
+    AddLabel(fog_label);
+    const Id flip{OpINotEqual(bool_id, OpBitwiseAnd(i32_id, fog_flags, ConstS32(2)), ConstS32(0))};
+    const Id flipped_index{
+        OpFMul(f32_id, OpFSub(f32_id, ConstF32(1.f), depth), ConstF32(128.f))};
+    const Id index{OpFMul(f32_id, depth, ConstF32(128.f))};
+    ApplyFog(OpSelect(f32_id, flip, flipped_index, index));
+    const Id fogged{combiner_output};
+    OpBranch(end_label);
+
+    AddLabel(no_fog_label);
+    OpBranch(end_label);
+
+    AddLabel(end_label);
+    combiner_output = OpPhi(vec_ids.Get(4), fogged, fog_label, unfogged, no_fog_label);
+}
+
+void FragmentModule::ApplyFog(Id fog_index) {
     // Generate clamped fog factor from LUT for given fog index
     const Id fog_i{OpFClamp(f32_id, OpFloor(f32_id, fog_index), ConstF32(0.f), ConstF32(127.f))};
     const Id fog_f{OpFSub(f32_id, fog_index, fog_i)};
-    const Id fog_lut_offset{GetShaderDataMember(i32_id, ConstS32(10))};
+    const Id fog_lut_offset{GetShaderDataMember(i32_id, DataMember(10))};
     const Id coord{OpIAdd(i32_id, OpConvertFToS(i32_id, fog_i), fog_lut_offset)};
     if (!Sirit::ValidId(texture_buffer_lut_lf)) {
         texture_buffer_lut_lf = OpLoad(image_buffer_id, texture_buffer_lut_lf_id);
@@ -199,7 +238,7 @@ void FragmentModule::WriteFog() {
     // Blend the fog
     const Id tex_env_rgb{
         OpVectorShuffle(vec_ids.Get(3), combiner_output, combiner_output, 0, 1, 2)};
-    const Id fog_color{GetShaderDataMember(vec_ids.Get(3), ConstS32(19))};
+    const Id fog_color{GetShaderDataMember(vec_ids.Get(3), DataMember(19))};
     const Id fog_factor_rgb{
         OpCompositeConstruct(vec_ids.Get(3), fog_factor, fog_factor, fog_factor)};
     const Id fog_result{OpFMix(vec_ids.Get(3), fog_color, tex_env_rgb, fog_factor_rgb)};
@@ -477,7 +516,7 @@ void FragmentModule::WriteLighting() {
         const Id light_count{OpBitwiseAnd(
             i32_id,
             OpShiftRightArithmetic(i32_id,
-                                   GetShaderDataMember(i32_id, ConstS32(24), ConstS32(0),
+                                   GetShaderDataMember(i32_id, DataMember(24), ConstS32(0),
                                                        ConstS32(8)),
                                    ConstS32(16)),
             ConstS32(0xF))};
@@ -495,11 +534,11 @@ void FragmentModule::WriteLighting() {
         // k-th light is slot k: one index for its loop info and its light data. Callers mask the
         // index to 3 bits so the compiler sees it's small (a single 16-bit multiply).
         const auto info_member = [&](Id index, s32 component) {
-            return GetShaderDataMember(i32_id, ConstS32(24), index, ConstS32(8 + component));
+            return GetShaderDataMember(i32_id, DataMember(24), index, ConstS32(8 + component));
         };
         const auto light_member = [&](Id index, s32 member) -> Id {
             const Id member_type = member < 6 ? vec3 : f32_id;
-            return GetShaderDataMember(member_type, ConstS32(24), index, ConstS32(member));
+            return GetShaderDataMember(member_type, DataMember(24), index, ConstS32(member));
         };
         const auto flag = [&](Id info, u32 bit) {
             return OpINotEqual(bool_id, OpBitwiseAnd(i32_id, info, ConstS32(1 << bit)),
@@ -720,7 +759,7 @@ void FragmentModule::WriteLighting() {
             const Id member_type = member < 6 ? vec_ids.Get(3) : f32_id;
             const Id light_num{
                 ConstS32(static_cast<s32>(lighting.lights[light_index].num.Value()))};
-            return GetShaderDataMember(member_type, ConstS32(24), light_num, ConstS32(member));
+            return GetShaderDataMember(member_type, DataMember(24), light_num, ConstS32(member));
         };
 
         // Compute light vector (directional or positional)
@@ -925,7 +964,7 @@ void FragmentModule::WriteLighting() {
     }
 
     // Sum final lighting result
-    const Id lighting_global_ambient{GetShaderDataMember(vec_ids.Get(3), ConstS32(23))};
+    const Id lighting_global_ambient{GetShaderDataMember(vec_ids.Get(3), DataMember(23))};
     const Id lighting_global_ambient_rgba{
         PadVectorF32(lighting_global_ambient, vec_ids.Get(4), 0.f)};
     const Id zero_vec{ConstF32(0.f, 0.f, 0.f, 0.f)};
@@ -1035,7 +1074,7 @@ void FragmentModule::WriteAlphaTestCondition(FramebufferRegs::CompareFunc func) 
         const Id alpha_scaled{
             OpFMul(f32_id, OpCompositeExtract(f32_id, combiner_output, 3), ConstF32(255.f))};
         const Id alpha_int{OpConvertFToS(i32_id, alpha_scaled)};
-        const Id alphatest_ref{GetShaderDataMember(i32_id, ConstS32(1))};
+        const Id alphatest_ref{GetShaderDataMember(i32_id, DataMember(1))};
         const Id alpha_comp_ref{compare(alpha_int, alphatest_ref)};
         const Id kill_label{OpLabel()};
         const Id keep_label{OpLabel()};
@@ -1069,7 +1108,7 @@ Id FragmentModule::SampleShadow() {
     }
     const Id abs_min_w{OpFMul(f32_id, OpFMin(f32_id, OpFAbs(f32_id, texcoord0_w), ConstF32(1.f)),
                               ConstF32(16777215.f))};
-    const Id shadow_texture_bias{GetShaderDataMember(i32_id, ConstS32(17))};
+    const Id shadow_texture_bias{GetShaderDataMember(i32_id, DataMember(17))};
     const Id z_i32{OpSMax(i32_id, ConstS32(0),
                           OpISub(i32_id, OpConvertFToS(i32_id, abs_min_w), shadow_texture_bias))};
     const Id z{OpBitcast(u32_id, z_i32)};
@@ -1263,7 +1302,7 @@ void FragmentModule::DefineTexSampler(u32 texture_unit) {
 
         AddLabel(border_label);
         const Id border_color{
-            GetShaderDataMember(vec_ids.Get(4), ConstS32(28), ConstU32(texture_unit))};
+            GetShaderDataMember(vec_ids.Get(4), DataMember(28), ConstU32(texture_unit))};
         OpReturnValue(border_color);
 
         AddLabel(not_border_label);
@@ -1284,7 +1323,7 @@ void FragmentModule::DefineTexSampler(u32 texture_unit) {
         const Id dx_dy_max{
             OpFMax(f32_id, OpCompositeExtract(f32_id, d, 0), OpCompositeExtract(f32_id, d, 1))};
         const Id lod{OpLog2(f32_id, dx_dy_max)};
-        const Id lod_bias{GetShaderDataMember(f32_id, ConstS32(27), ConstU32(texture_unit))};
+        const Id lod_bias{GetShaderDataMember(f32_id, DataMember(27), ConstU32(texture_unit))};
         const Id biased_lod{OpFAdd(f32_id, lod, lod_bias)};
         return OpImageSampleExplicitLod(vec_ids.Get(4), sampled_image, texcoord,
                                         spv::ImageOperandsMask::Lod, biased_lod);
@@ -1373,7 +1412,7 @@ Id FragmentModule::ProcTexSampler() {
     const Id duv{OpFMax(vec_ids.Get(2), uv_1, uv_2)};
 
     // unlike normal texture, the bias is inside the log2
-    const Id proctex_bias{GetShaderDataMember(f32_id, ConstS32(16))};
+    const Id proctex_bias{GetShaderDataMember(f32_id, DataMember(16))};
     const Id bias{
         OpFMul(f32_id, ConstF32(static_cast<f32>(config.proctex.lut_width)), proctex_bias)};
     const Id duv_xy{
@@ -1393,7 +1432,7 @@ Id FragmentModule::ProcTexSampler() {
 
     // Generate noise
     if (config.proctex.noise_enable) {
-        const Id proctex_noise_a{GetShaderDataMember(vec_ids.Get(2), ConstS32(21))};
+        const Id proctex_noise_a{GetShaderDataMember(vec_ids.Get(2), DataMember(21))};
         const Id noise_coef{ProcTexNoiseCoef(uv)};
         uv = OpFAdd(vec_ids.Get(2), uv,
                     OpVectorTimesScalar(vec_ids.Get(2), proctex_noise_a, noise_coef));
@@ -1409,7 +1448,7 @@ Id FragmentModule::ProcTexSampler() {
     v = AppendProcTexClamp(v, config.proctex.v_clamp);
 
     // Combine and map
-    const Id proctex_color_map_offset{GetShaderDataMember(i32_id, ConstS32(12))};
+    const Id proctex_color_map_offset{GetShaderDataMember(i32_id, DataMember(12))};
     const Id lut_coord{
         AppendProcTexCombineAndMap(config.proctex.color_combiner, u, v, proctex_color_map_offset)};
 
@@ -1437,7 +1476,7 @@ Id FragmentModule::ProcTexSampler() {
     }
 
     if (config.proctex.separate_alpha) {
-        const Id proctex_alpha_map_offset{GetShaderDataMember(i32_id, ConstS32(13))};
+        const Id proctex_alpha_map_offset{GetShaderDataMember(i32_id, DataMember(13))};
         const Id final_alpha{AppendProcTexCombineAndMap(config.proctex.alpha_combiner, u, v,
                                                         proctex_alpha_map_offset)};
         final_color = OpCompositeInsert(vec_ids.Get(4), final_alpha, final_color, 3);
@@ -1502,8 +1541,8 @@ Id FragmentModule::ProcTexNoiseCoef(Id x) {
         return OpFma(f32_id, OpConvertSToF(f32_id, v2), ConstF32(2.f / 15.f), ConstF32(-1.f));
     };
 
-    const Id proctex_noise_f{GetShaderDataMember(vec_ids.Get(2), ConstS32(20))};
-    const Id proctex_noise_p{GetShaderDataMember(vec_ids.Get(2), ConstS32(22))};
+    const Id proctex_noise_f{GetShaderDataMember(vec_ids.Get(2), DataMember(20))};
+    const Id proctex_noise_p{GetShaderDataMember(vec_ids.Get(2), DataMember(22))};
     const Id grid{OpFMul(vec_ids.Get(2),
                          OpVectorTimesScalar(vec_ids.Get(2), proctex_noise_f, ConstF32(9.f)),
                          OpFAbs(vec_ids.Get(2), OpFAdd(vec_ids.Get(2), x, proctex_noise_p)))};
@@ -1524,7 +1563,7 @@ Id FragmentModule::ProcTexNoiseCoef(Id x) {
     const Id g3{OpFMul(f32_id,
                        proctex_noise_rand2D(OpFAdd(vec_ids.Get(2), point, ConstF32(1.f, 1.f))),
                        frac_x_y_min_two)};
-    const Id proctex_noise_lut_offset{GetShaderDataMember(i32_id, ConstS32(11))};
+    const Id proctex_noise_lut_offset{GetShaderDataMember(i32_id, DataMember(11))};
     const Id x_noise{ProcTexLookupLUT(proctex_noise_lut_offset, frac_x)};
     const Id y_noise{ProcTexLookupLUT(proctex_noise_lut_offset, frac_y)};
     const Id x0{OpFMix(f32_id, g0, g1, x_noise)};
@@ -1547,7 +1586,7 @@ Id FragmentModule::SampleProcTexColor(Id lut_coord, Id level) {
         texture_buffer_lut_rgba = OpLoad(image_buffer_id, texture_buffer_lut_rgba_id);
     }
 
-    const Id proctex_lut_offset{GetShaderDataMember(i32_id, ConstS32(14))};
+    const Id proctex_lut_offset{GetShaderDataMember(i32_id, DataMember(14))};
 
     switch (config.proctex.lut_filter) {
     case ProcTexFilter::Linear:
@@ -1555,7 +1594,7 @@ Id FragmentModule::SampleProcTexColor(Id lut_coord, Id level) {
     case ProcTexFilter::LinearMipmapNearest: {
         const Id lut_index_i{OpIAdd(i32_id, OpConvertFToS(i32_id, lut_coord), lut_offset)};
         const Id lut_index_f{OpFract(f32_id, lut_coord)};
-        const Id proctex_diff_lut_offset{GetShaderDataMember(i32_id, ConstS32(15))};
+        const Id proctex_diff_lut_offset{GetShaderDataMember(i32_id, DataMember(15))};
         const Id p1{OpIAdd(i32_id, lut_index_i, proctex_lut_offset)};
         const Id p2{OpIAdd(i32_id, lut_index_i, proctex_diff_lut_offset)};
         const Id texel1{OpImageFetch(vec_ids.Get(4), texture_buffer_lut_rgba, p1)};
@@ -1584,7 +1623,7 @@ Id FragmentModule::LookupLightingLUT(Id lut_index, Id index, Id delta) {
 
     const Id lut_index_x{OpShiftRightArithmetic(i32_id, lut_index, ConstS32(2))};
     const Id lut_index_y{OpBitwiseAnd(i32_id, lut_index, ConstS32(3))};
-    const Id lut_offset{GetShaderDataMember(i32_id, ConstS32(18), lut_index_x, lut_index_y)};
+    const Id lut_offset{GetShaderDataMember(i32_id, DataMember(18), lut_index_x, lut_index_y)};
     const Id coord{OpIAdd(i32_id, lut_offset, index)};
     const Id entry{OpImageFetch(vec_ids.Get(4), texture_buffer_lut_lf, coord)};
     const Id entry_r{OpCompositeExtract(f32_id, entry, 0)};
@@ -1612,7 +1651,7 @@ Id FragmentModule::GetSource(TevStageConfig::Source source, s32 index) {
     case Source::PreviousBuffer:
         return combiner_buffer;
     case Source::Constant:
-        return GetShaderDataMember(vec_ids.Get(4), ConstS32(25), ConstS32(index));
+        return GetShaderDataMember(vec_ids.Get(4), DataMember(25), ConstS32(index));
     case Source::Previous:
         return combiner_output;
     default:
@@ -1847,17 +1886,30 @@ void FragmentModule::DefineUniformStructs() {
     const Id const_color_array_id{TypeArray(vec_ids.Get(4), ConstU32(NUM_TEV_STAGES))};
     const Id border_color_array_id{TypeArray(vec_ids.Get(4), ConstU32(NUM_NON_PROC_TEX_UNITS))};
 
-    const Id shader_data_struct_id{
-        TypeStruct(i32_id, i32_id, f32_id, f32_id, f32_id, f32_id, i32_id, i32_id, i32_id, i32_id,
-                   i32_id, i32_id, i32_id, i32_id, i32_id, i32_id, f32_id, i32_id,
-                   lighting_lut_array_id, vec_ids.Get(3), vec_ids.Get(2), vec_ids.Get(2),
-                   vec_ids.Get(2), vec_ids.Get(3), light_src_array_id, const_color_array_id,
-                   vec_ids.Get(4), vec_ids.Get(3), border_color_array_id, vec_ids.Get(4))};
+    // The members up to shadow_texture_bias, then the ones in the padding before
+    // lighting_lut_offset that only keys in uniform form read (DataMember() skips them), then the
+    // rest.
+    boost::container::small_vector<Id, 32> shader_data_members{
+        i32_id, i32_id, f32_id, f32_id, f32_id, f32_id, i32_id, i32_id, i32_id,
+        i32_id, i32_id, i32_id, i32_id, i32_id, i32_id, i32_id, f32_id, i32_id};
+    boost::container::small_vector<u32, 32> shader_data_offsets{
+        0u, 4u, 8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u, 48u, 52u, 56u, 60u, 64u, 68u};
+    if (use_uniform_fog) {
+        fog_flags_member = static_cast<u32>(shader_data_members.size());
+        shader_data_members.push_back(i32_id);
+        shader_data_offsets.push_back(72u);
+    }
+    extra_data_members = static_cast<u32>(shader_data_members.size()) - 18;
+    shader_data_members.insert(
+        shader_data_members.end(),
+        {lighting_lut_array_id, vec_ids.Get(3), vec_ids.Get(2), vec_ids.Get(2), vec_ids.Get(2),
+         vec_ids.Get(3), light_src_array_id, const_color_array_id, vec_ids.Get(4), vec_ids.Get(3),
+         border_color_array_id, vec_ids.Get(4)});
+    shader_data_offsets.insert(shader_data_offsets.end(), {80u, 176u, 192u, 200u, 208u, 224u, 240u,
+                                                           1136u, 1232u, 1248u, 1264u, 1312u});
+    const Id shader_data_struct_id{TypeStruct(std::span<const Id>{shader_data_members})};
 
     constexpr std::array light_src_offsets{0u, 16u, 32u, 48u, 64u, 80u, 92u, 96u};
-    constexpr std::array shader_data_offsets{
-        0u,  4u,  8u,  12u, 16u,  20u,  24u,  28u,  32u,  36u,  40u,   44u,   48u,   52u,   56u,
-        60u, 64u, 68u, 80u, 176u, 192u, 200u, 208u, 224u, 240u, 1136u, 1232u, 1248u, 1264u, 1312u};
 
     Decorate(lighting_lut_array_id, spv::Decoration::ArrayStride, 16u);
     Decorate(light_src_array_id, spv::Decoration::ArrayStride, 112u);

@@ -55,6 +55,12 @@ private:
     /// Writes the code to emulate fog
     void WriteFog();
 
+    /// Fog as a uniform branch: fog on/off and fog_flip from FSUniformData::fog_flags
+    void WriteUniformFog();
+
+    /// Blends the fog color into combiner_output for the given fog LUT index
+    void ApplyFog(Id fog_index);
+
     /// Writes the code to emulate gas rendering
     void WriteGas();
 
@@ -125,6 +131,14 @@ private:
         const Id table_const{ConstS32(elems...)};
         OpStore(table, table_const);
     };
+
+    /// The index of an FSUniformData member in the shader_data struct, given its index without
+    /// the members that DefineUniformStructs() inserts for keys in uniform form
+    [[nodiscard]] Id DataMember(u32 index) {
+        constexpr u32 first_moved_member = 18; // lighting_lut_offset
+        return ConstS32(static_cast<s32>(index < first_moved_member ? index
+                                                                    : index + extra_data_members));
+    }
 
     /// Loads the member specified from the shader_data uniform struct
     template <typename... Ids>
@@ -230,6 +244,12 @@ private:
     Id light_i_var{};
     Id light_diffuse_var{};
     Id light_specular_var{};
+    // Fog as a uniform branch (FSFogUniformEnabled()): the key is in that form.
+    bool use_uniform_fog{};
+    // shader_data members inserted before lighting_lut_offset, in that struct's padding, for keys
+    // in uniform form (DefineUniformStructs()). Later members move up by that many.
+    u32 extra_data_members{};
+    u32 fog_flags_member{};
 
     Id void_id{};
     Id bool_id{};

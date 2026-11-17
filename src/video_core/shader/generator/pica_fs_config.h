@@ -186,14 +186,30 @@ struct TextureConfig {
         BitField<12, 3, Pica::TexturingRegs::FogMode> fog_mode;
         BitField<15, 1, u32> fog_flip;
         BitField<16, 1, u32> shadow_texture_orthographic;
+        // Fog as a uniform branch: the key is in that form (see MakeUniformFogKey()).
+        BitField<17, 1, u32> fog_uniform;
     };
     std::array<TextureBorder, 3> texture_border_color{};
     std::array<TevStageConfigRaw, 6> tev_stages{};
 
     void ApplyProfile(const Profile& profile);
 
+    /// Fog as a uniform branch (see FSFogUniformEnabled()): the shader reads whether fog is on and
+    /// fog_flip from FSUniformData::fog_flags, so the key drops fog_mode and fog_flip. Gas mode
+    /// keeps its key, since it replaces the whole output (FragmentModule::WriteGas()).
+    void MakeUniformFogKey() {
+        if (fog_mode == Pica::TexturingRegs::FogMode::Gas) {
+            return;
+        }
+        fog_mode.Assign(Pica::TexturingRegs::FogMode::None);
+        fog_flip.Assign(0);
+        fog_uniform.Assign(1);
+    }
+
     static consteval u64 StructHash() {
-        constexpr u64 STRUCT_VERSION = 0;
+        // 1: fog_uniform (bit 17 of the first word, unused before), so caches written with or
+        // without it don't load into the other build.
+        constexpr u64 STRUCT_VERSION = 1;
 
         using T = TextureConfig;
         return Common::HashCombine(STRUCT_VERSION,
@@ -457,6 +473,13 @@ inline bool FSHardwareScissorEnabled() {
     return enabled;
 }
 
+/// Fog on/off and fog_flip come from a uniform, and fog runs as a uniform branch
+/// (AZAHAR_FS_FOG_UNIFORM).
+inline bool FSFogUniformEnabled() {
+    static const bool enabled = FSKeyToggleFromEnv("AZAHAR_FS_FOG_UNIFORM");
+    return enabled;
+}
+
 struct FSConfig {
     // Applies the profile, so draws that generate the same shader share a key.
     explicit FSConfig(const Pica::RegsInternal& regs, const Profile& profile);
@@ -488,6 +511,9 @@ struct FSConfig {
     void MakeRuntimeStateKey() {
         if (FSHardwareScissorEnabled()) {
             framebuffer.MakeHardwareScissorKey();
+        }
+        if (FSFogUniformEnabled()) {
+            texture.MakeUniformFogKey();
         }
     }
 

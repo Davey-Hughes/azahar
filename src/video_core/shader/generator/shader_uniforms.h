@@ -5,6 +5,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include "common/vector_math.h"
 #include "video_core/pica/regs_lighting.h"
 
@@ -58,6 +59,10 @@ struct FSUniformData {
     int proctex_diff_lut_offset;
     float proctex_bias;
     int shadow_texture_bias;
+    // In the padding before lighting_lut_offset, so the GLSL declarations of this block stay as
+    // they are. Read only by SPIR-V shaders whose key is in uniform form
+    // (FSConfig::MakeRuntimeStateKey()).
+    int fog_flags; // bit 0: fog_mode is Fog, bit 1: fog_flip
     alignas(16) Common::Vec4i lighting_lut_offset[LightingRegs::NumLightingSampler / 4];
     alignas(16) Common::Vec3f fog_color;
     alignas(8) Common::Vec2f proctex_noise_f;
@@ -74,6 +79,8 @@ struct FSUniformData {
 
 static_assert(sizeof(FSUniformData) == 0x530,
               "The size of the UniformData does not match the structure in the shader");
+static_assert(offsetof(FSUniformData, fog_flags) == 72 &&
+              offsetof(FSUniformData, lighting_lut_offset) == 80);
 static_assert(sizeof(FSUniformData) < 16384,
               "UniformData structure must be less than 16kb as per the OpenGL spec");
 
