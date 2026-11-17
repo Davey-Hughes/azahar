@@ -497,16 +497,21 @@ inline bool FSHardwareScissorEnabled() {
 }
 
 /// Which keys take fog in uniform form (TextureConfig::MakeUniformFogKey()), from
-/// AZAHAR_FS_FOG_UNIFORM: 0 = none, unset or 1 = all (Always), "config" = only configs already drawn
-/// with fog (PerConfig), "seen" = all from the first draw with fog on (Seen). The last two are
-/// decided per draw in ShaderDiskCache::UseFragmentShader(); a fog shader costs compile time in
-/// every shader that has it, which games without fog don't get back in merged keys.
+/// AZAHAR_FS_FOG_UNIFORM: unset or 0 = none, 1 = all (Always), "config" = only configs already
+/// drawn with fog (PerConfig), "seen" = all from the first draw with fog on (Seen). The last two
+/// are decided per draw in ShaderDiskCache::UseFragmentShader(); a fog shader costs compile time in
+/// every shader that has it, which games without fog don't get back in merged keys. Off by
+/// default: Always made OoT3D's FS-library compile ~47% slower, and Seen's warm-cache behavior is
+/// unchecked.
 enum class FSFogUniformMode { Off, Always, PerConfig, Seen };
 
 inline FSFogUniformMode GetFSFogUniformMode() {
     static const FSFogUniformMode mode = [] {
         const char* env = std::getenv("AZAHAR_FS_FOG_UNIFORM");
-        if (env == nullptr || env[0] == '\0' || env[0] == '1') {
+        if (env == nullptr || env[0] == '\0') {
+            return FSFogUniformMode::Off;
+        }
+        if (env[0] == '1') {
             return FSFogUniformMode::Always;
         }
         const std::string_view value{env};
