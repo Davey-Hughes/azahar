@@ -90,6 +90,15 @@ struct FramebufferConfig {
 
     void ApplyProfile(const Profile& profile);
 
+    /// Hardware scissor (see FSHardwareScissorEnabled()): RasterizerVulkan::Draw() clips "Include"
+    /// with the dynamic scissor, so the key drops it. The key is then the same as a "Disabled" one
+    /// and so is its shader, so caches stay valid either way.
+    void MakeHardwareScissorKey() {
+        if (scissor_test_mode == Pica::RasterizerRegs::ScissorMode::Include) {
+            scissor_test_mode.Assign(Pica::RasterizerRegs::ScissorMode::Disabled);
+        }
+    }
+
     static consteval u64 StructHash() {
         constexpr u64 STRUCT_VERSION = 0;
 
@@ -434,6 +443,20 @@ inline bool FSLightLoopEnabled() {
     return enabled;
 }
 
+/// FS key trio toggles: each is on unless its variable is 0 (read once, like
+/// FSLightLoopEnabled()).
+inline bool FSKeyToggleFromEnv(const char* name) {
+    const char* env = std::getenv(name);
+    return env == nullptr || env[0] != '0';
+}
+
+/// PICA scissor "Include" clips with the Vulkan dynamic scissor instead of a discard in the
+/// fragment shader (AZAHAR_FS_HW_SCISSOR).
+inline bool FSHardwareScissorEnabled() {
+    static const bool enabled = FSKeyToggleFromEnv("AZAHAR_FS_HW_SCISSOR");
+    return enabled;
+}
+
 struct FSConfig {
     // Applies the profile, so draws that generate the same shader share a key.
     explicit FSConfig(const Pica::RegsInternal& regs, const Profile& profile);
@@ -458,6 +481,14 @@ struct FSConfig {
     void ApplyProfile(const Profile& profile) {
         framebuffer.ApplyProfile(profile);
         texture.ApplyProfile(profile);
+    }
+
+    /// Takes the state that the SPIR-V generator's shaders get at run time out of the key, for
+    /// the toggles that are on. Only for configs the SPIR-V generator builds.
+    void MakeRuntimeStateKey() {
+        if (FSHardwareScissorEnabled()) {
+            framebuffer.MakeHardwareScissorKey();
+        }
     }
 
     bool operator==(const FSConfig& other) const noexcept {

@@ -272,6 +272,7 @@ static void ImportPocTogglesFromProperties() {
         "AZAHAR_PREWARM_RGB565",
         "AZAHAR_FS_LIGHT_LOOP",
         "AZAHAR_FS_LIGHT_LOOP_MIN",
+        "AZAHAR_FS_HW_SCISSOR",
     };
     for (const char* name : names) {
         const std::string prop = "debug." + Common::ToLower(name);

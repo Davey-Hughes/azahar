@@ -64,6 +64,25 @@ struct DrawParams {
     return std::min(max_size, TEXTURE_BUFFER_SIZE);
 }
 
+/// The draw rectangle clipped to the PICA scissor box, for scissor mode "Include". The box comes
+/// from FramebufferHelper::Scissor() in the same scaled framebuffer coordinates as draw_rect (left
+/// and bottom inclusive, right and top exclusive). FragmentModule::WriteScissor() in
+/// src/video_core/shader/generator/spv_fs_shader_gen.cpp keeps a fragment when
+/// left <= x < right and bottom <= y < top at its pixel center, which with integer edges is the
+/// same set of pixels. An empty box gives an empty scissor: the shader would discard everything.
+[[nodiscard]] Common::Rectangle<u32> ClipToPicaScissor(const Common::Rectangle<u32>& draw_rect,
+                                                       const Common::Rectangle<s32>& scissor) {
+    const s64 left = std::max<s64>(draw_rect.left, scissor.left);
+    const s64 right = std::min<s64>(draw_rect.right, scissor.right);
+    const s64 bottom = std::max<s64>(draw_rect.bottom, scissor.bottom);
+    const s64 top = std::min<s64>(draw_rect.top, scissor.top);
+    if (left >= right || bottom >= top) {
+        return {draw_rect.left, draw_rect.bottom, draw_rect.left, draw_rect.bottom};
+    }
+    return {static_cast<u32>(left), static_cast<u32>(top), static_cast<u32>(right),
+            static_cast<u32>(bottom)};
+}
+
 } // Anonymous namespace
 
 RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore& pica,
@@ -921,6 +940,12 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
         viewport.y + viewport.height,
     };
     pipeline_info.dynamic_info.scissor = draw_rect;
+    if (Pica::Shader::FSHardwareScissorEnabled() &&
+        regs.rasterizer.scissor_test.mode == Pica::RasterizerRegs::ScissorMode::Include) {
+        // Shaders from the SPIR-V generator leave this test to the scissor
+        // (FramebufferConfig::MakeHardwareScissorKey()); the others still run it, to no effect.
+        pipeline_info.dynamic_info.scissor = ClipToPicaScissor(draw_rect, fb_helper.Scissor());
+    }
 
     // Draw the vertex batch
     bool succeeded = true;
