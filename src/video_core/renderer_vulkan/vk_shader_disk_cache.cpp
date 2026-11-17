@@ -210,6 +210,7 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseFragmentShader(
             fs_config.lighting.MakeLoopKey();
         }
         fs_config.MakeRuntimeStateKey();
+        UseAdaptiveFogKey(fs_config);
     }
     const auto fs_config_hash = fs_config.Hash();
     const auto [it, new_shader] = fragment_shaders.try_emplace(fs_config_hash, parent.instance);
@@ -244,6 +245,34 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseFragmentShader(
     }
 
     return std::make_pair(fs_config_hash, &shader);
+}
+
+void ShaderDiskCache::UseAdaptiveFogKey(FSConfig& fs_config) {
+    using Pica::Shader::FSFogUniformMode;
+    using FogMode = Pica::TexturingRegs::FogMode;
+    const FSFogUniformMode mode = Pica::Shader::GetFSFogUniformMode();
+    if ((mode != FSFogUniformMode::PerConfig && mode != FSFogUniformMode::Seen) ||
+        fs_config.texture.fog_mode == FogMode::Gas) {
+        return;
+    }
+    // Both forms draw a fog-off config correctly. A draw with fog on takes the uniform form. A
+    // draw with fog off keeps a shader it already has: the plain one, else the uniform one. A new
+    // fog-off config gets the plain form, or in "seen" mode the uniform one once the game has used
+    // fog. A warm cache holds whichever form the cold run made, so it picks the same one again.
+    FSConfig uniform = fs_config;
+    uniform.texture.MakeUniformFogKey();
+    if (fs_config.texture.fog_mode == FogMode::Fog) {
+        fog_seen = true;
+        fs_config = uniform;
+        return;
+    }
+    if (fragment_shaders.contains(fs_config.Hash())) {
+        return;
+    }
+    if (fragment_shaders.contains(uniform.Hash()) ||
+        (mode == FSFogUniformMode::Seen && fog_seen)) {
+        fs_config = uniform;
+    }
 }
 
 std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseFixedGeometryShader(

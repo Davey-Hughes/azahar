@@ -53,6 +53,9 @@ private:
 
     static SourceFileCacheVersionHash GetSourceFileCacheVersionHash();
 
+    /// Fog uniform modes "config" and "seen": picks the fog form of a key per draw
+    void UseAdaptiveFogKey(Pica::Shader::FSConfig& fs_config);
+
     enum class CacheFileType : u32 {
         VS_CACHE = 0,
         FS_CACHE = 1,
@@ -362,6 +365,8 @@ private:
     std::unordered_set<u64> known_vertex_programs;
 
     std::unordered_map<u64, Shader> fragment_shaders;
+    /// Fog uniform mode "seen" (Pica::Shader::GetFSFogUniformMode()): a draw with fog on happened
+    bool fog_seen{};
 
     std::unordered_map<size_t, Shader> fixed_geometry_shaders;
     std::unordered_set<u64> known_geometry_shaders;

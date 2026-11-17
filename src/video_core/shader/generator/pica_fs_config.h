@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdlib>
+#include <string_view>
 #include "common/hash.h"
 #include "video_core/pica/regs_internal.h"
 #include "video_core/shader/generator/profile.h"
@@ -495,11 +496,34 @@ inline bool FSHardwareScissorEnabled() {
     return enabled;
 }
 
-/// Fog on/off and fog_flip come from a uniform, and fog runs as a uniform branch
-/// (AZAHAR_FS_FOG_UNIFORM).
+/// Which keys take fog in uniform form (TextureConfig::MakeUniformFogKey()), from
+/// AZAHAR_FS_FOG_UNIFORM: 0 = none, unset or 1 = all (Always), "config" = only configs already drawn
+/// with fog (PerConfig), "seen" = all from the first draw with fog on (Seen). The last two are
+/// decided per draw in ShaderDiskCache::UseFragmentShader(); a fog shader costs compile time in
+/// every shader that has it, which games without fog don't get back in merged keys.
+enum class FSFogUniformMode { Off, Always, PerConfig, Seen };
+
+inline FSFogUniformMode GetFSFogUniformMode() {
+    static const FSFogUniformMode mode = [] {
+        const char* env = std::getenv("AZAHAR_FS_FOG_UNIFORM");
+        if (env == nullptr || env[0] == '\0' || env[0] == '1') {
+            return FSFogUniformMode::Always;
+        }
+        const std::string_view value{env};
+        if (value == "config") {
+            return FSFogUniformMode::PerConfig;
+        }
+        if (value == "seen") {
+            return FSFogUniformMode::Seen;
+        }
+        return FSFogUniformMode::Off;
+    }();
+    return mode;
+}
+
+/// Fog on/off and fog_flip come from a uniform for keys in that form (see GetFSFogUniformMode()).
 inline bool FSFogUniformEnabled() {
-    static const bool enabled = FSKeyToggleFromEnv("AZAHAR_FS_FOG_UNIFORM");
-    return enabled;
+    return GetFSFogUniformMode() != FSFogUniformMode::Off;
 }
 
 /// What TEV stages 0-3 write to the combiner buffer comes from a uniform
@@ -541,7 +565,7 @@ struct FSConfig {
         if (FSHardwareScissorEnabled()) {
             framebuffer.MakeHardwareScissorKey();
         }
-        if (FSFogUniformEnabled()) {
+        if (GetFSFogUniformMode() == FSFogUniformMode::Always) {
             texture.MakeUniformFogKey();
         }
         if (FSCombinerBufferUniformEnabled()) {
