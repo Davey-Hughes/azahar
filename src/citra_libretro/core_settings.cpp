@@ -73,6 +73,7 @@ static constexpr const char* dump_textures = citra_setting(BaseKeys::dump_textur
 // Personal build options (ubershader PoC), not upstream.
 static constexpr const char* shader_compilation = "citra_shader_compilation";
 static constexpr const char* fast_pipeline_linking = "citra_fast_pipeline_linking";
+static constexpr const char* fog_uniform = "citra_fog_uniform";
 } // namespace graphics
 
 namespace layout {
@@ -418,6 +419,27 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
             { nullptr, nullptr }
         },
         config::enabled
+    },
+    {
+        config::graphics::fog_uniform,
+        "Fog Without Shader Variants (Vulkan)",
+        "Fog Without Shader Variants",
+        "Fragment shaders read fog on/off from uniform data instead of compiling one variant "
+        "with fog and one without. Fewer shaders to compile in games that switch fog per draw "
+        "(Luigi's Mansion 2), but the shaders that take it carry the fog code, which makes "
+        "compiles slower in games that rarely draw with fog (Ocarina of Time 3D with Always). "
+        "After First Fog Draw applies it only once the game has drawn with fog; Per Shader only "
+        "to shaders already seen with fog. Restart RetroArch to apply.",
+        nullptr,
+        config::category::graphics,
+        {
+            { config::disabled, "Disabled" },
+            { "seen", "After First Fog Draw" },
+            { "config", "Per Shader" },
+            { "always", "Always" },
+            { nullptr, nullptr }
+        },
+        config::disabled
     },
     {
         config::graphics::resolution_factor,
@@ -1076,21 +1098,25 @@ static Settings::GraphicsAPI GetGraphicsAPI(const std::string& name) {
 // Personal build: the ubershader PoC's switches are AZAHAR_* environment variables, most read
 // once per process. Set them from the core options, unless the variable was already set when
 // the core first looked, so a desktop run can still override one from the shell.
-static void SetPocSwitch(const char* name, bool on) {
+static void SetPocSwitch(const char* name, const char* value) {
     static std::map<std::string, bool, std::less<>> set_outside;
     const auto [it, first] = set_outside.try_emplace(name, std::getenv(name) != nullptr);
     if (it->second) {
         return;
     }
 #ifdef _WIN32
-    _putenv_s(name, on ? "1" : "");
+    _putenv_s(name, value != nullptr ? value : "");
 #else
-    if (on) {
-        setenv(name, "1", 1);
+    if (value != nullptr) {
+        setenv(name, value, 1);
     } else {
         unsetenv(name);
     }
 #endif
+}
+
+static void SetPocSwitch(const char* name, bool on) {
+    SetPocSwitch(name, on ? "1" : nullptr);
 }
 
 static void ParseGraphicsOptions(void) {
@@ -1134,6 +1160,13 @@ static void ParseGraphicsOptions(void) {
         // uniforms through PicaVSConfigState, so the disk cache can preload them. The PoC's
         // version keys them differently from what the cache stores; keep it off.
         SetPocSwitch("AZAHAR_VS_SPECIALIZE_BOOLS", false);
+
+        // Read once by Pica::Shader::GetFSFogUniformMode() (pica_fs_config.h); unset = off.
+        const auto fog = LibRetro::FetchVariable(config::graphics::fog_uniform, config::disabled);
+        SetPocSwitch("AZAHAR_FS_FOG_UNIFORM", fog == "seen"     ? "seen"
+                                              : fog == "config" ? "config"
+                                              : fog == "always" ? "1"
+                                                                : nullptr);
     }
 
     auto resolution = LibRetro::FetchVariable(config::graphics::resolution_factor, "1");
