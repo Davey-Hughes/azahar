@@ -127,6 +127,10 @@ if ("x86_64" IN_LIST ARCHITECTURE OR "arm64" IN_LIST ARCHITECTURE)
     else()
         set(DYNARMIC_TESTS OFF CACHE BOOL "")
         set(DYNARMIC_FRONTENDS "A32" CACHE STRING "")
+        # Personal build: skip dynarmic's per-block IR verification and register lock checks,
+        # which otherwise run in release builds (Davey-Hughes/dynarmic skip-release-checks).
+        # FORCE, so it also reaches build dirs configured before this line.
+        set(DYNARMIC_IGNORE_ASSERTS ON CACHE BOOL "" FORCE)
         set(DYNARMIC_USE_PRECOMPILED_HEADERS ${CITRA_USE_PRECOMPILED_HEADERS} CACHE BOOL "")
         add_subdirectory(dynarmic EXCLUDE_FROM_ALL)
     endif()
