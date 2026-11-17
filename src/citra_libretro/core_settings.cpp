@@ -457,7 +457,7 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
             { config::enabled, "Enabled" },
             { nullptr, nullptr }
         },
-        config::disabled
+        config::enabled
     },
     {
         config::graphics::resolution_factor,
@@ -1188,7 +1188,7 @@ static void ParseGraphicsOptions(void) {
 
         // Read by the vertex shader decompiler (glsl_shader_decompiler.cpp); unset = off.
         const bool lean = LibRetro::FetchVariable(config::graphics::lean_vertex_shaders,
-                                                  config::disabled) == config::enabled;
+                                                  config::enabled) == config::enabled;
         SetPocSwitch("AZAHAR_VS_PRUNE_BOOL_BRANCHES", lean);
         SetPocSwitch("AZAHAR_VS_STRUCTURED_JUMPS", lean);
     }
