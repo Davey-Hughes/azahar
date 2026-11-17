@@ -188,6 +188,9 @@ struct TextureConfig {
         BitField<16, 1, u32> shadow_texture_orthographic;
         // Fog as a uniform branch: the key is in that form (see MakeUniformFogKey()).
         BitField<17, 1, u32> fog_uniform;
+        // TEV buffer updates from a uniform: the key is in that form (see
+        // MakeUniformCombinerBufferKey()).
+        BitField<18, 1, u32> combiner_buffer_uniform;
     };
     std::array<TextureBorder, 3> texture_border_color{};
     std::array<TevStageConfigRaw, 6> tev_stages{};
@@ -206,10 +209,29 @@ struct TextureConfig {
         fog_uniform.Assign(1);
     }
 
+    /// TEV buffer updates from a uniform (see FSCombinerBufferUniformEnabled()): stages 0-3 pick
+    /// what they write to the combiner buffer from FSUniformData::combiner_buffer_input, so the
+    /// key drops combiner_buffer_input. Only a stage after the first can read what they write, so
+    /// without such a reader the key drops it with no uniform.
+    void MakeUniformCombinerBufferKey() {
+        using Source = Pica::TexturingRegs::TevStageConfig::Source;
+        bool read_later = false;
+        for (std::size_t i = 1; i < tev_stages.size(); ++i) {
+            const Pica::TexturingRegs::TevStageConfig stage = tev_stages[i];
+            for (const Source source : {stage.color_source1.Value(), stage.color_source2.Value(),
+                                        stage.color_source3.Value(), stage.alpha_source1.Value(),
+                                        stage.alpha_source2.Value(), stage.alpha_source3.Value()}) {
+                read_later |= source == Source::PreviousBuffer;
+            }
+        }
+        combiner_buffer_input.Assign(0);
+        combiner_buffer_uniform.Assign(read_later ? 1 : 0);
+    }
+
     static consteval u64 StructHash() {
-        // 1: fog_uniform (bit 17 of the first word, unused before), so caches written with or
-        // without it don't load into the other build.
-        constexpr u64 STRUCT_VERSION = 1;
+        // 1: fog_uniform, 2: combiner_buffer_uniform (bits 17 and 18 of the first word, unused
+        // before), so caches written with or without them don't load into the other build.
+        constexpr u64 STRUCT_VERSION = 2;
 
         using T = TextureConfig;
         return Common::HashCombine(STRUCT_VERSION,
@@ -480,6 +502,13 @@ inline bool FSFogUniformEnabled() {
     return enabled;
 }
 
+/// What TEV stages 0-3 write to the combiner buffer comes from a uniform
+/// (AZAHAR_FS_COMBINER_BUFFER_UNIFORM).
+inline bool FSCombinerBufferUniformEnabled() {
+    static const bool enabled = FSKeyToggleFromEnv("AZAHAR_FS_COMBINER_BUFFER_UNIFORM");
+    return enabled;
+}
+
 struct FSConfig {
     // Applies the profile, so draws that generate the same shader share a key.
     explicit FSConfig(const Pica::RegsInternal& regs, const Profile& profile);
@@ -514,6 +543,9 @@ struct FSConfig {
         }
         if (FSFogUniformEnabled()) {
             texture.MakeUniformFogKey();
+        }
+        if (FSCombinerBufferUniformEnabled()) {
+            texture.MakeUniformCombinerBufferKey();
         }
     }
 

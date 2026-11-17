@@ -22,7 +22,8 @@ FragmentModule::FragmentModule(const FSConfig& config_, const Profile& profile_)
       use_fragment_shader_barycentric{profile.has_fragment_shader_barycentric &&
                                       config.lighting.enable},
       use_light_loop{config.lighting.enable && config.lighting.loop_form},
-      use_uniform_fog{config.texture.fog_uniform != 0} {
+      use_uniform_fog{config.texture.fog_uniform != 0},
+      use_uniform_combiner_buffer{config.texture.combiner_buffer_uniform != 0} {
     config.ApplyProfile(profile_);
     DefineArithmeticTypes();
     DefineUniformStructs();
@@ -68,6 +69,10 @@ void FragmentModule::Generate() {
     combiner_buffer = ConstF32(0.f, 0.f, 0.f, 0.f);
     next_combiner_buffer = GetShaderDataMember(vec_ids.Get(4), DataMember(26));
     combiner_output = ConstF32(0.f, 0.f, 0.f, 0.f);
+    if (use_uniform_combiner_buffer) {
+        combiner_buffer_input = GetShaderDataMember(
+            i32_id, ConstS32(static_cast<s32>(combiner_buffer_input_member)));
+    }
 
     // Write shader bytecode to emulate PICA TEV stages
     for (u32 index = 0; index < config.texture.tev_stages.size(); ++index) {
@@ -1031,6 +1036,20 @@ void FragmentModule::WriteTevStage(s32 index) {
         next_combiner_buffer =
             OpVectorShuffle(vec_ids.Get(4), next_combiner_buffer, combiner_output, 0, 1, 2, 7);
     }
+
+    if (use_uniform_combiner_buffer && index < 4) {
+        // FSConfig::MakeRuntimeStateKey() left combiner_buffer_input out of the key.
+        const auto updates = [&](u32 bit) {
+            const Id mask{ConstS32(static_cast<s32>(1u << bit))};
+            return OpINotEqual(bool_id, OpBitwiseAnd(i32_id, combiner_buffer_input, mask),
+                               ConstS32(0));
+        };
+        const Id rgb{updates(static_cast<u32>(index))};
+        const Id alpha{updates(static_cast<u32>(index) + 4)};
+        const Id select{OpCompositeConstruct(bvec_ids.Get(4), rgb, rgb, rgb, alpha)};
+        next_combiner_buffer =
+            OpSelect(vec_ids.Get(4), select, combiner_output, next_combiner_buffer);
+    }
 }
 
 using ProcTexClamp = TexturingRegs::ProcTexClamp;
@@ -1898,6 +1917,11 @@ void FragmentModule::DefineUniformStructs() {
         fog_flags_member = static_cast<u32>(shader_data_members.size());
         shader_data_members.push_back(i32_id);
         shader_data_offsets.push_back(72u);
+    }
+    if (use_uniform_combiner_buffer) {
+        combiner_buffer_input_member = static_cast<u32>(shader_data_members.size());
+        shader_data_members.push_back(i32_id);
+        shader_data_offsets.push_back(76u);
     }
     extra_data_members = static_cast<u32>(shader_data_members.size()) - 18;
     shader_data_members.insert(

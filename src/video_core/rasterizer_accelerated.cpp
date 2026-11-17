@@ -160,14 +160,21 @@ void RasterizerAccelerated::SyncDrawUniforms() {
     const bool prev_flipped = std::exchange(vs_data.flip_viewport, is_flipped);
     vs_data_dirty |= is_flipped != prev_flipped;
 
-    // Fog as a uniform branch (Pica::Shader::FSFogUniformEnabled()); compared every draw like the
-    // flip bit, since no dirty check covers GPUREG_TEXENV_UPDATE_BUFFER.
+    // Uniforms for SPIR-V shader keys without fog and TEV buffer settings
+    // (Pica::Shader::FSConfig::MakeRuntimeStateKey()). They come from GPUREG_TEXENV_UPDATE_BUFFER,
+    // which no dirty check covers, so they're compared every draw like the flip bit.
+    const auto& texturing = regs.texturing;
     if (Pica::Shader::FSFogUniformEnabled()) {
-        const auto& texturing = regs.texturing;
         const int fog_flags =
             (texturing.fog_mode == Pica::TexturingRegs::FogMode::Fog ? 1 : 0) |
             (texturing.fog_flip != 0 ? 2 : 0);
         fs_data_dirty |= std::exchange(fs_data.fog_flags, fog_flags) != fog_flags;
+    }
+    if (Pica::Shader::FSCombinerBufferUniformEnabled()) {
+        const auto& buffer_input = texturing.tev_combiner_buffer_input;
+        const int updates =
+            static_cast<int>(buffer_input.update_mask_rgb | buffer_input.update_mask_a << 4);
+        fs_data_dirty |= std::exchange(fs_data.combiner_buffer_input, updates) != updates;
     }
 
     // Sync clip plane uniforms

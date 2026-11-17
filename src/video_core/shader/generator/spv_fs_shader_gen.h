@@ -250,6 +250,11 @@ private:
     // in uniform form (DefineUniformStructs()). Later members move up by that many.
     u32 extra_data_members{};
     u32 fog_flags_member{};
+    // TEV buffer updates from a uniform (FSCombinerBufferUniformEnabled()): the key is in that
+    // form.
+    bool use_uniform_combiner_buffer{};
+    u32 combiner_buffer_input_member{};
+    Id combiner_buffer_input{};
 
     Id void_id{};
     Id bool_id{};
