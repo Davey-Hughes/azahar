@@ -75,6 +75,7 @@ static constexpr const char* shader_compilation = "citra_shader_compilation";
 static constexpr const char* fast_pipeline_linking = "citra_fast_pipeline_linking";
 static constexpr const char* fog_uniform = "citra_fog_uniform";
 static constexpr const char* lean_vertex_shaders = "citra_lean_vertex_shaders";
+static constexpr const char* merge_tev_inputs = "citra_merge_tev_inputs";
 } // namespace graphics
 
 namespace layout {
@@ -450,6 +451,22 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
         "plain if/else blocks instead of a jump loop where the program only jumps forward. The "
         "shaders compile faster (A Link Between Worlds, Super Mario 3D Land) and draw the same. "
         "Restart RetroArch to apply.",
+        nullptr,
+        config::category::graphics,
+        {
+            { config::disabled, "Disabled" },
+            { config::enabled, "Enabled" },
+            { nullptr, nullptr }
+        },
+        config::enabled
+    },
+    {
+        config::graphics::merge_tev_inputs,
+        "Merge Equivalent Fragment Shaders",
+        "Merge Equivalent Fragment Shaders",
+        "Fragment shaders whose texture combiner stages differ only in inputs the stage never "
+        "reads share one shader. Fewer shaders to compile (A Link Between Worlds builds 7% "
+        "fewer pipelines) and the same frames. Restart RetroArch to apply.",
         nullptr,
         config::category::graphics,
         {
@@ -1191,6 +1208,11 @@ static void ParseGraphicsOptions(void) {
                                                   config::enabled) == config::enabled;
         SetPocSwitch("AZAHAR_VS_PRUNE_BOOL_BRANCHES", lean);
         SetPocSwitch("AZAHAR_VS_STRUCTURED_JUMPS", lean);
+
+        // Read once by Pica::Shader::FSTevNormalizeEnabled() (pica_fs_config.h); unset = on.
+        const bool merge = LibRetro::FetchVariable(config::graphics::merge_tev_inputs,
+                                                   config::enabled) == config::enabled;
+        SetPocSwitch("AZAHAR_FS_TEV_NORMALIZE", merge ? "1" : "0");
     }
 
     auto resolution = LibRetro::FetchVariable(config::graphics::resolution_factor, "1");
