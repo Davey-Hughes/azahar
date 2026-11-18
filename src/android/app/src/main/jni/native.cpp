@@ -275,6 +275,7 @@ static void ImportPocTogglesFromProperties() {
         "AZAHAR_FS_HW_SCISSOR",
         "AZAHAR_FS_FOG_UNIFORM",
         "AZAHAR_FS_COMBINER_BUFFER_UNIFORM",
+        "AZAHAR_FS_TEV_NORMALIZE",
     };
     for (const char* name : names) {
         const std::string prop = "debug." + Common::ToLower(name);

@@ -153,6 +153,48 @@ struct TevStageConfigRaw {
 };
 static_assert(std::has_unique_object_representations_v<TevStageConfigRaw>);
 
+/// A TEV stage that leaves the combiner output as it is, so the fragment shader generators emit
+/// no code for it.
+[[nodiscard]] inline bool IsPassthroughTevStage(const Pica::TexturingRegs::TevStageConfig& stage) {
+    using TevStageConfig = Pica::TexturingRegs::TevStageConfig;
+    return stage.color_op == TevStageConfig::Operation::Replace &&
+           stage.alpha_op == TevStageConfig::Operation::Replace &&
+           stage.color_source1 == TevStageConfig::Source::Previous &&
+           stage.alpha_source1 == TevStageConfig::Source::Previous &&
+           stage.color_modifier1 == TevStageConfig::ColorModifier::SourceColor &&
+           stage.alpha_modifier1 == TevStageConfig::AlphaModifier::SourceAlpha &&
+           stage.GetColorMultiplier() == 1 && stage.GetAlphaMultiplier() == 1;
+}
+
+/// How many of a TEV stage's three inputs an operation reads.
+[[nodiscard]] inline u32 TevOperationInputs(Pica::TexturingRegs::TevStageConfig::Operation op) {
+    using Operation = Pica::TexturingRegs::TevStageConfig::Operation;
+    switch (op) {
+    case Operation::Replace:
+        return 1;
+    case Operation::Modulate:
+    case Operation::Add:
+    case Operation::AddSigned:
+    case Operation::Subtract:
+    case Operation::Dot3_RGB:
+    case Operation::Dot3_RGBA:
+        return 2;
+    case Operation::Lerp:
+    case Operation::MultiplyThenAdd:
+    case Operation::AddThenMultiply:
+        return 3;
+    default:
+        return 0;
+    }
+}
+
+/// How many alpha inputs a TEV stage reads. Dot3_RGBA writes its result to alpha too, so the
+/// alpha inputs go unread.
+[[nodiscard]] inline u32 TevAlphaInputs(const Pica::TexturingRegs::TevStageConfig& stage) {
+    using Operation = Pica::TexturingRegs::TevStageConfig::Operation;
+    return stage.color_op == Operation::Dot3_RGBA ? 0 : TevOperationInputs(stage.alpha_op);
+}
+
 union TextureBorder {
     u32 raw{};
     BitField<0, 1, u32> enable_s;
@@ -227,6 +269,49 @@ struct TextureConfig {
         }
         combiner_buffer_input.Assign(0);
         combiner_buffer_uniform.Assign(read_later ? 1 : 0);
+    }
+
+    /// Drops from the key the TEV inputs no operation reads (see FSTevNormalizeEnabled()), so
+    /// draws that differ only there share a shader. A passthrough stage (IsPassthroughTevStage())
+    /// takes one form, and every other stage keeps the sources and modifiers of the inputs its
+    /// operations read (TevOperationInputs(), TevAlphaInputs()) and zeroes the rest. At stage 0
+    /// an input that names Previous reads source 3 instead (FragmentModule::AppendColorModifier()),
+    /// so such an input takes source 3's value; where that is Previous too, the input and source 3
+    /// both stay Previous. Call before MakeUniformCombinerBufferKey(), so an unread input that
+    /// names PreviousBuffer doesn't keep the combiner buffer.
+    void NormalizeTevInputs() {
+        constexpr u32 previous = static_cast<u32>(Pica::TexturingRegs::TevStageConfig::Source::Previous);
+        for (std::size_t i = 0; i < tev_stages.size(); ++i) {
+            TevStageConfigRaw& raw = tev_stages[i];
+            const Pica::TexturingRegs::TevStageConfig stage = raw;
+            if (IsPassthroughTevStage(stage)) {
+                raw = {.sources_raw = previous | previous << 16};
+                continue;
+            }
+            u32 sources = 0;
+            u32 modifiers = 0;
+            // Color input k: source and modifier at bit 4k (4 bits each). Alpha input k: source at
+            // bit 16 + 4k, modifier at bit 12 + 4k (3 bits).
+            const auto keep_inputs = [&](u32 source_shift, u32 modifier_shift, u32 modifier_mask,
+                                         u32 count) {
+                const u32 source3 = (raw.sources_raw >> (source_shift + 8)) & 0xF;
+                for (u32 k = 0; k < count; ++k) {
+                    u32 source = (raw.sources_raw >> (source_shift + 4 * k)) & 0xF;
+                    if (i == 0 && source == previous) {
+                        source = source3;
+                        if (source == previous) {
+                            sources |= previous << (source_shift + 8);
+                        }
+                    }
+                    sources |= source << (source_shift + 4 * k);
+                    modifiers |= raw.modifiers_raw & (modifier_mask << (modifier_shift + 4 * k));
+                }
+            };
+            keep_inputs(0, 0, 0xF, TevOperationInputs(stage.color_op));
+            keep_inputs(16, 12, 0x7, TevAlphaInputs(stage));
+            raw.sources_raw = sources;
+            raw.modifiers_raw = modifiers;
+        }
     }
 
     static consteval u64 StructHash() {
@@ -538,6 +623,13 @@ inline bool FSCombinerBufferUniformEnabled() {
     return enabled;
 }
 
+/// The key leaves out the TEV inputs no operation reads (TextureConfig::NormalizeTevInputs(),
+/// AZAHAR_FS_TEV_NORMALIZE). The shader computes the same output, so it costs nothing at run time.
+inline bool FSTevNormalizeEnabled() {
+    static const bool enabled = FSKeyToggleFromEnv("AZAHAR_FS_TEV_NORMALIZE");
+    return enabled;
+}
+
 struct FSConfig {
     // Applies the profile, so draws that generate the same shader share a key.
     explicit FSConfig(const Pica::RegsInternal& regs, const Profile& profile);
@@ -572,6 +664,9 @@ struct FSConfig {
         }
         if (GetFSFogUniformMode() == FSFogUniformMode::Always) {
             texture.MakeUniformFogKey();
+        }
+        if (FSTevNormalizeEnabled()) {
+            texture.NormalizeTevInputs();
         }
         if (FSCombinerBufferUniformEnabled()) {
             texture.MakeUniformCombinerBufferKey();

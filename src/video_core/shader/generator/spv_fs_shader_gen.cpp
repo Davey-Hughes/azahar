@@ -982,18 +982,8 @@ void FragmentModule::WriteLighting() {
 void FragmentModule::WriteTevStage(s32 index) {
     const TexturingRegs::TevStageConfig stage = config.texture.tev_stages[index];
 
-    // Detects if a TEV stage is configured to be skipped (to avoid generating unnecessary code)
-    const auto is_passthrough_tev_stage = [](const TevStageConfig& stage) {
-        return (stage.color_op == TevStageConfig::Operation::Replace &&
-                stage.alpha_op == TevStageConfig::Operation::Replace &&
-                stage.color_source1 == TevStageConfig::Source::Previous &&
-                stage.alpha_source1 == TevStageConfig::Source::Previous &&
-                stage.color_modifier1 == TevStageConfig::ColorModifier::SourceColor &&
-                stage.alpha_modifier1 == TevStageConfig::AlphaModifier::SourceAlpha &&
-                stage.GetColorMultiplier() == 1 && stage.GetAlphaMultiplier() == 1);
-    };
-
-    if (!is_passthrough_tev_stage(stage)) {
+    // Skips a stage that leaves the combiner output as it is (to avoid generating unnecessary code)
+    if (!IsPassthroughTevStage(stage)) {
         color_results_1 = AppendColorModifier(stage.color_modifier1, stage.color_source1, index);
         color_results_2 = AppendColorModifier(stage.color_modifier2, stage.color_source2, index);
         color_results_3 = AppendColorModifier(stage.color_modifier3, stage.color_source3, index);
