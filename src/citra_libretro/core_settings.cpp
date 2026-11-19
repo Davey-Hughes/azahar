@@ -46,6 +46,8 @@ namespace cpu {
 static constexpr const char* use_cpu_jit = citra_setting(BaseKeys::use_cpu_jit);
 static constexpr const char* use_fastinterp = citra_setting(BaseKeys::use_fastinterp);
 static constexpr const char* cpu_clock_percentage = citra_setting(BaseKeys::cpu_clock_percentage);
+// Personal build option, not upstream.
+static constexpr const char* fastmem = "citra_fastmem";
 } // namespace cpu
 
 namespace system {
@@ -188,6 +190,22 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
             { nullptr, nullptr }
         },
         config::enabled
+    },
+    {
+        config::cpu::fastmem,
+        "Fast Memory Access",
+        "Fast Memory Access",
+        "Let the CPU JIT reach emulated memory with a single host load or store instead of a "
+        "page table lookup, using a host memory mirror of the guest address space. Linux and "
+        "Android only. Takes effect when a game starts.",
+        nullptr,
+        config::category::cpu,
+        {
+            { config::disabled, "Disabled" },
+            { config::enabled, "Enabled" },
+            { nullptr, nullptr }
+        },
+        config::disabled
     },
     {
         config::cpu::cpu_clock_percentage,
@@ -1213,6 +1231,11 @@ static void ParseGraphicsOptions(void) {
         const bool merge = LibRetro::FetchVariable(config::graphics::merge_tev_inputs,
                                                    config::enabled) == config::enabled;
         SetPocSwitch("AZAHAR_FS_TEV_NORMALIZE", merge ? "1" : "0");
+
+        // Read when System::Init() builds the MemorySystem (src/core/memory.cpp); unset = off.
+        const bool fastmem =
+            LibRetro::FetchVariable(config::cpu::fastmem, config::disabled) == config::enabled;
+        SetPocSwitch("AZAHAR_FASTMEM", fastmem);
     }
 
     auto resolution = LibRetro::FetchVariable(config::graphics::resolution_factor, "1");
