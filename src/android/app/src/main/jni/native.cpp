@@ -276,6 +276,8 @@ static void ImportPocTogglesFromProperties() {
         "AZAHAR_FS_FOG_UNIFORM",
         "AZAHAR_FS_COMBINER_BUFFER_UNIFORM",
         "AZAHAR_FS_TEV_NORMALIZE",
+        // Read when System::Init() builds the MemorySystem, which follows this import.
+        "AZAHAR_FASTMEM",
     };
     for (const char* name : names) {
         const std::string prop = "debug." + Common::ToLower(name);
