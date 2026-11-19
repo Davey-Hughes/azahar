@@ -2,9 +2,12 @@
 // Licensed under GPLv2 or any later version
 // Refer to the misc/licenses/gplv2.txt file included.
 
+#include <algorithm>
 #include <array>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
+#include <vector>
 #include <boost/serialization/array.hpp>
 #include <boost/serialization/binary_object.hpp>
 #include "audio_core/dsp_interface.h"
@@ -12,6 +15,7 @@
 #include "common/assert.h"
 #include "common/atomic_ops.h"
 #include "common/common_types.h"
+#include "common/host_memory.h"
 #include "common/logging/log.h"
 #include "common/optional_helper.h"
 #include "common/settings.h"
@@ -29,6 +33,10 @@
 #include "video_core/gpu.h"
 #include "video_core/renderer_base.h"
 
+#ifdef __linux__
+#include <unistd.h>
+#endif
+
 SERIALIZE_EXPORT_IMPL(Memory::MemorySystem::BackingMemImpl<Memory::Region::FCRAM>)
 SERIALIZE_EXPORT_IMPL(Memory::MemorySystem::BackingMemImpl<Memory::Region::VRAM>)
 SERIALIZE_EXPORT_IMPL(Memory::MemorySystem::BackingMemImpl<Memory::Region::DSP>)
@@ -43,12 +51,6 @@ constexpr u32 SIGSEGV = 11;
 #endif
 
 namespace Memory {
-
-void PageTable::Clear() {
-    pointers.raw.fill(nullptr);
-    pointers.refs.fill(MemoryRef());
-    attributes.fill(PageType::Unmapped);
-}
 
 class RasterizerCacheMarker {
 public:
@@ -98,14 +100,144 @@ private:
     }
 };
 
+#ifdef __linux__
+namespace {
+
+// The guard page past 4 GiB catches multi-byte accesses at the top of the address space.
+constexpr std::size_t FASTMEM_ARENA_SIZE = (std::size_t{1} << 32) + CITRA_PAGE_SIZE;
+
+constexpr std::size_t FASTMEM_BACKING_SIZE =
+    FCRAM_N3DS_SIZE + VRAM_SIZE + N3DS_EXTRA_RAM_SIZE + DSP_RAM_SIZE;
+
+bool FastmemRequested() {
+    const char* value = std::getenv("AZAHAR_FASTMEM");
+    return value && std::strcmp(value, "1") == 0;
+}
+
+} // Anonymous namespace
+
+struct FastmemArena {
+    explicit FastmemArena(Common::HostMemory& backing_)
+        : backing{backing_}, arena{backing_, FASTMEM_ARENA_SIZE}, mapped(PAGE_TABLE_NUM_ENTRIES) {}
+
+    /// The backing page + 1 that a table pointer should show, or 0 for inaccessible.
+    u32 Wanted(const u8* pointer) const {
+        if (!backing.Contains(pointer)) {
+            return 0;
+        }
+        const std::size_t offset = backing.OffsetOf(pointer);
+        return (offset & CITRA_PAGE_MASK) ? 0 : static_cast<u32>(offset >> CITRA_PAGE_BITS) + 1;
+    }
+
+    /// Brings [first, first + count) in line with the table, one syscall per run of changes.
+    void Sync(const PageTable& page_table, std::size_t first, std::size_t count) {
+        if (failed) {
+            return;
+        }
+        const auto& raw = page_table.GetPointerArray();
+        const std::size_t end = std::min(first + count, PAGE_TABLE_NUM_ENTRIES);
+        std::size_t page = first;
+        while (page < end) {
+            const u32 want = Wanted(raw[page]);
+            if (want == mapped[page]) {
+                page++;
+                continue;
+            }
+            std::size_t run_end = page + 1;
+            for (; run_end < end; run_end++) {
+                const u32 next = Wanted(raw[run_end]);
+                const u32 contiguous = want ? want + static_cast<u32>(run_end - page) : 0;
+                if (next == mapped[run_end] || next != contiguous) {
+                    break;
+                }
+            }
+            const std::size_t length = (run_end - page) * CITRA_PAGE_SIZE;
+            const bool ok = want ? arena.Map(page * CITRA_PAGE_SIZE,
+                                             (want - 1) * std::size_t{CITRA_PAGE_SIZE}, length)
+                                 : arena.Unmap(page * CITRA_PAGE_SIZE, length);
+            if (!ok) {
+                Fail();
+                return;
+            }
+            for (std::size_t i = page; i < run_end; i++) {
+                mapped[i] = want ? want + static_cast<u32>(i - page) : 0;
+            }
+            page = run_end;
+        }
+    }
+
+    void Rebuild(const PageTable& page_table) {
+        if (failed) {
+            return;
+        }
+        if (!arena.Unmap(0, FASTMEM_ARENA_SIZE)) {
+            Fail();
+            return;
+        }
+        std::fill(mapped.begin(), mapped.end(), 0);
+        Sync(page_table, 0, PAGE_TABLE_NUM_ENTRIES);
+    }
+
+    /// Gives up on the arena: every page becomes inaccessible, so JIT accesses fault and are
+    /// recompiled to the page table, and later syncs are skipped.
+    void Fail() {
+        LOG_ERROR(HW_Memory, "Fastmem arena update failed ({}), using the page table instead",
+                  std::strerror(errno));
+        failed = true;
+        // One mapping over the whole reservation, so this needs no new VMAs.
+        ASSERT_MSG(arena.Unmap(0, FASTMEM_ARENA_SIZE), "Resetting the fastmem arena failed: {}",
+                   std::strerror(errno));
+    }
+
+    Common::HostMemory& backing;
+    Common::VirtualArena arena;
+    std::vector<u32> mapped;
+    bool failed = false;
+};
+#else
+struct FastmemArena {};
+#endif
+
+void PageTable::FastmemArenaDeleter::operator()(FastmemArena* arena) const {
+    delete arena;
+}
+
+namespace {
+
+void SyncFastmem([[maybe_unused]] PageTable& page_table, [[maybe_unused]] std::size_t first,
+                 [[maybe_unused]] std::size_t count) {
+#ifdef __linux__
+    if (page_table.fastmem) {
+        page_table.fastmem->Sync(page_table, first, count);
+    }
+#endif
+}
+
+} // Anonymous namespace
+
+void PageTable::Clear() {
+    pointers.raw.fill(nullptr);
+    pointers.refs.fill(MemoryRef());
+    attributes.fill(PageType::Unmapped);
+    SyncFastmem(*this, 0, PAGE_TABLE_NUM_ENTRIES);
+}
+
 class MemorySystem::Impl {
 public:
+#ifdef __linux__
+    // With fastmem on, the regions below are views into this one fd-backed allocation.
+    std::unique_ptr<Common::HostMemory> host_memory;
+#endif
     // Visual Studio would try to allocate these on compile time
     // if they are std::array which would exceed the memory limit.
-    std::unique_ptr<u8[]> fcram = std::make_unique<u8[]>(Memory::FCRAM_N3DS_SIZE);
-    std::unique_ptr<u8[]> vram = std::make_unique<u8[]>(Memory::VRAM_SIZE);
-    std::unique_ptr<u8[]> n3ds_extra_ram = std::make_unique<u8[]>(Memory::N3DS_EXTRA_RAM_SIZE);
-    std::unique_ptr<u8[]> dsp_ram = std::make_unique<u8[]>(Memory::DSP_RAM_SIZE);
+    std::unique_ptr<u8[]> fcram_buffer;
+    std::unique_ptr<u8[]> vram_buffer;
+    std::unique_ptr<u8[]> n3ds_extra_ram_buffer;
+    std::unique_ptr<u8[]> dsp_ram_buffer;
+    u8* fcram;
+    u8* vram;
+    u8* n3ds_extra_ram;
+    u8* dsp_ram;
 
     Core::System& system;
     std::shared_ptr<PageTable> current_page_table = nullptr;
@@ -124,13 +256,13 @@ public:
     const u8* GetPtr(Region r) const {
         switch (r) {
         case Region::VRAM:
-            return vram.get();
+            return vram;
         case Region::DSP:
-            return dsp_ram.get();
+            return dsp_ram;
         case Region::FCRAM:
-            return fcram.get();
+            return fcram;
         case Region::N3DS:
-            return n3ds_extra_ram.get();
+            return n3ds_extra_ram;
         default:
             UNREACHABLE();
         }
@@ -139,13 +271,13 @@ public:
     u8* GetPtr(Region r) {
         switch (r) {
         case Region::VRAM:
-            return vram.get();
+            return vram;
         case Region::DSP:
-            return dsp_ram.get();
+            return dsp_ram;
         case Region::FCRAM:
-            return fcram.get();
+            return fcram;
         case Region::N3DS:
-            return n3ds_extra_ram.get();
+            return n3ds_extra_ram;
         default:
             UNREACHABLE();
         }
@@ -349,12 +481,12 @@ private:
     void serialize(Archive& ar, const unsigned int file_version) {
         bool save_n3ds_ram = Settings::values.is_new_3ds.GetValue();
         ar & save_n3ds_ram;
-        ar& boost::serialization::make_binary_object(vram.get(), Memory::VRAM_SIZE);
+        ar& boost::serialization::make_binary_object(vram, Memory::VRAM_SIZE);
         ar& boost::serialization::make_binary_object(
-            fcram.get(), save_n3ds_ram ? Memory::FCRAM_N3DS_SIZE : Memory::FCRAM_SIZE);
+            fcram, save_n3ds_ram ? Memory::FCRAM_N3DS_SIZE : Memory::FCRAM_SIZE);
         ar& boost::serialization::make_binary_object(
-            n3ds_extra_ram.get(), save_n3ds_ram ? Memory::N3DS_EXTRA_RAM_SIZE : 0);
-        ar& boost::serialization::make_binary_object(dsp_ram.get(), Memory::DSP_RAM_SIZE);
+            n3ds_extra_ram, save_n3ds_ram ? Memory::N3DS_EXTRA_RAM_SIZE : 0);
+        ar& boost::serialization::make_binary_object(dsp_ram, Memory::DSP_RAM_SIZE);
         ar & cache_marker;
         ar & page_table_list;
         // dsp is set from Core::System at startup
@@ -398,7 +530,40 @@ MemorySystem::Impl::Impl(Core::System& system_)
     : system{system_}, fcram_mem(std::make_shared<BackingMemImpl<Region::FCRAM>>(*this)),
       vram_mem(std::make_shared<BackingMemImpl<Region::VRAM>>(*this)),
       n3ds_extra_ram_mem(std::make_shared<BackingMemImpl<Region::N3DS>>(*this)),
-      dsp_mem(std::make_shared<BackingMemImpl<Region::DSP>>(*this)) {}
+      dsp_mem(std::make_shared<BackingMemImpl<Region::DSP>>(*this)) {
+#ifdef __linux__
+    // The arenas mirror 4 KiB guest pages, so fastmem needs 4 KiB host pages.
+    if (FastmemRequested()) {
+        if (sysconf(_SC_PAGESIZE) == CITRA_PAGE_SIZE) {
+            host_memory = std::make_unique<Common::HostMemory>(FASTMEM_BACKING_SIZE);
+            if (!host_memory->BackingBasePointer()) {
+                host_memory.reset();
+            }
+        }
+        if (host_memory) {
+            LOG_INFO(HW_Memory, "Fastmem on");
+        } else {
+            LOG_WARNING(HW_Memory, "Fastmem requested but unavailable, using the page table");
+        }
+    }
+    if (host_memory) {
+        u8* base = host_memory->BackingBasePointer();
+        fcram = base;
+        vram = fcram + FCRAM_N3DS_SIZE;
+        n3ds_extra_ram = vram + VRAM_SIZE;
+        dsp_ram = n3ds_extra_ram + N3DS_EXTRA_RAM_SIZE;
+        return;
+    }
+#endif
+    fcram_buffer = std::make_unique<u8[]>(Memory::FCRAM_N3DS_SIZE);
+    vram_buffer = std::make_unique<u8[]>(Memory::VRAM_SIZE);
+    n3ds_extra_ram_buffer = std::make_unique<u8[]>(Memory::N3DS_EXTRA_RAM_SIZE);
+    dsp_ram_buffer = std::make_unique<u8[]>(Memory::DSP_RAM_SIZE);
+    fcram = fcram_buffer.get();
+    vram = vram_buffer.get();
+    n3ds_extra_ram = n3ds_extra_ram_buffer.get();
+    dsp_ram = dsp_ram_buffer.get();
+}
 
 MemorySystem::MemorySystem(Core::System& system) : impl(std::make_unique<Impl>(system)) {}
 MemorySystem::~MemorySystem() = default;
@@ -406,6 +571,9 @@ MemorySystem::~MemorySystem() = default;
 template <class Archive>
 void MemorySystem::serialize(Archive& ar, const unsigned int file_version) {
     ar&* impl.get();
+    if constexpr (Archive::is_loading::value) {
+        RebuildFastmemArenas();
+    }
 }
 
 SERIALIZE_IMPL(MemorySystem)
@@ -463,6 +631,7 @@ void MemorySystem::RegisterWatchpoint(const Kernel::Process& process, VAddr addr
             page_table.watchpoint_pages_map.insert(
                 {page_index,
                  PageTable::WatchpointPageInfo{.watchpoint_count = 1, .memory = std::move(mem)}});
+            SyncFastmem(page_table, page_index, 1);
         }
 
         current = page_base + CITRA_PAGE_SIZE;
@@ -499,6 +668,7 @@ void MemorySystem::UnregisterWatchpoint(const Kernel::Process& process, VAddr ad
                 }
 
                 page_table.watchpoint_pages_map.erase(page_index);
+                SyncFastmem(page_table, page_index, 1);
             }
         } else {
             LOG_ERROR(HW_Memory, "No watchpoint found on page 0x{:08X}", page_base);
@@ -518,6 +688,7 @@ void MemorySystem::MapPages(PageTable& page_table, u32 base, u32 size, MemoryRef
                                      FlushMode::FlushAndInvalidate);
     }
 
+    const u32 first = base;
     u32 end = base + size;
     while (base != end) {
         ASSERT_MSG(base < PAGE_TABLE_NUM_ENTRIES, "out of range mapping at {:08X}", base);
@@ -535,6 +706,7 @@ void MemorySystem::MapPages(PageTable& page_table, u32 base, u32 size, MemoryRef
         if (memory != nullptr && memory.GetSize() > CITRA_PAGE_SIZE)
             memory += CITRA_PAGE_SIZE;
     }
+    SyncFastmem(page_table, first, size);
 }
 
 void MemorySystem::MapMemoryRegion(PageTable& page_table, VAddr base, u32 size, MemoryRef target) {
@@ -563,6 +735,47 @@ void MemorySystem::UnregisterPageTable(std::shared_ptr<PageTable> page_table) {
     if (it != impl->page_table_list.end()) {
         impl->page_table_list.erase(it);
     }
+}
+
+bool MemorySystem::IsFastmemEnabled() const {
+#ifdef __linux__
+    return impl->host_memory != nullptr;
+#else
+    return false;
+#endif
+}
+
+u8* MemorySystem::GetFastmemBase([[maybe_unused]] PageTable& page_table) {
+#ifdef __linux__
+    if (!impl->host_memory) {
+        return nullptr;
+    }
+    // Created here rather than in RegisterPageTable(): ARM_Interface::load() (see
+    // src/core/arm/arm_interface.h) builds a JIT for a loaded table before this MemorySystem has
+    // loaded its table list.
+    if (!page_table.fastmem) {
+        std::unique_ptr<FastmemArena, PageTable::FastmemArenaDeleter> arena{
+            new FastmemArena(*impl->host_memory)};
+        if (!arena->arena.Base()) {
+            return nullptr;
+        }
+        arena->Sync(page_table, 0, PAGE_TABLE_NUM_ENTRIES);
+        page_table.fastmem = std::move(arena);
+    }
+    return page_table.fastmem->arena.Base();
+#else
+    return nullptr;
+#endif
+}
+
+void MemorySystem::RebuildFastmemArenas() {
+#ifdef __linux__
+    for (auto& page_table : impl->page_table_list) {
+        if (page_table->fastmem) {
+            page_table->fastmem->Rebuild(*page_table);
+        }
+    }
+#endif
 }
 
 template <typename T>
@@ -992,6 +1205,27 @@ void MemorySystem::RasterizerMarkRegionCached(PAddr start, u32 size, bool cached
     u32 num_pages = ((start + size - 1) >> CITRA_PAGE_BITS) - (start >> CITRA_PAGE_BITS) + 1;
     PAddr paddr = start;
 
+    // Changed pages as runs of {table, first page, count}, synced after the loop.
+    struct FastmemRun {
+        PageTable* page_table;
+        u32 first;
+        u32 count;
+    };
+    std::vector<FastmemRun> fastmem_runs;
+    const auto changed = [&fastmem_runs](PageTable& page_table, VAddr vaddr) {
+        if (!page_table.fastmem) {
+            return;
+        }
+        const u32 page = vaddr >> CITRA_PAGE_BITS;
+        for (auto& run : fastmem_runs) {
+            if (run.page_table == &page_table && run.first + run.count == page) {
+                run.count++;
+                return;
+            }
+        }
+        fastmem_runs.push_back({&page_table, page, 1});
+    };
+
     for (unsigned i = 0; i < num_pages; ++i, paddr += CITRA_PAGE_SIZE) {
         for (VAddr vaddr : PhysicalToVirtualAddressForRasterizer(paddr)) {
             impl->cache_marker.Mark(vaddr, cached);
@@ -1011,6 +1245,7 @@ void MemorySystem::RasterizerMarkRegionCached(PAddr start, u32 size, bool cached
                                         ? PageType::RasterizerCachedMemory
                                         : PageType::RasterizerCachedMemoryWatchpoint;
                         page_table->pointers[vaddr >> CITRA_PAGE_BITS] = nullptr;
+                        changed(*page_table, vaddr);
                         break;
                     default:
                         UNREACHABLE();
@@ -1031,6 +1266,7 @@ void MemorySystem::RasterizerMarkRegionCached(PAddr start, u32 size, bool cached
                         if (page_type == PageType::Memory) {
                             page_table->pointers[vaddr >> CITRA_PAGE_BITS] =
                                 GetPointerForRasterizerCache(vaddr & ~CITRA_PAGE_MASK);
+                            changed(*page_table, vaddr);
                         }
                         break;
                     }
@@ -1040,6 +1276,10 @@ void MemorySystem::RasterizerMarkRegionCached(PAddr start, u32 size, bool cached
                 }
             }
         }
+    }
+
+    for (const auto& run : fastmem_runs) {
+        SyncFastmem(*run.page_table, run.first, run.count);
     }
 }
 
@@ -1268,18 +1508,18 @@ void MemorySystem::CopyBlock(const Kernel::Process& dest_process,
 }
 
 u32 MemorySystem::GetFCRAMOffset(const u8* pointer) const {
-    ASSERT(pointer >= impl->fcram.get() && pointer <= impl->fcram.get() + Memory::FCRAM_N3DS_SIZE);
-    return static_cast<u32>(pointer - impl->fcram.get());
+    ASSERT(pointer >= impl->fcram && pointer <= impl->fcram + Memory::FCRAM_N3DS_SIZE);
+    return static_cast<u32>(pointer - impl->fcram);
 }
 
 u8* MemorySystem::GetFCRAMPointer(std::size_t offset) {
     ASSERT(offset <= Memory::FCRAM_N3DS_SIZE);
-    return impl->fcram.get() + offset;
+    return impl->fcram + offset;
 }
 
 const u8* MemorySystem::GetFCRAMPointer(std::size_t offset) const {
     ASSERT(offset <= Memory::FCRAM_N3DS_SIZE);
-    return impl->fcram.get() + offset;
+    return impl->fcram + offset;
 }
 
 MemoryRef MemorySystem::GetFCRAMRef(std::size_t offset) const {
@@ -1289,7 +1529,7 @@ MemoryRef MemorySystem::GetFCRAMRef(std::size_t offset) const {
 
 u8* MemorySystem::GetDspMemory(std::size_t offset) const {
     ASSERT(offset <= Memory::DSP_RAM_SIZE);
-    return impl->dsp_ram.get() + offset;
+    return impl->dsp_ram + offset;
 }
 
 } // namespace Memory

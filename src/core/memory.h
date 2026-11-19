@@ -5,6 +5,7 @@
 #pragma once
 #include <array>
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <string>
 #include <boost/serialization/array.hpp>
@@ -51,6 +52,8 @@ enum class PageType : u8 {
     /// invalidation. Furthermore a debug watchpoint is set to an address within the page.
     RasterizerCachedMemoryWatchpoint,
 };
+
+struct FastmemArena;
 
 /**
  * A (reasonably) fast way of allowing switchable and remappable process address spaces. It loosely
@@ -112,6 +115,10 @@ struct PageTable {
         return pointers.raw;
     }
 
+    const std::array<u8*, PAGE_TABLE_NUM_ENTRIES>& GetPointerArray() const {
+        return pointers.raw;
+    }
+
     struct WatchpointPageInfo {
         u32 watchpoint_count{};
         MemoryRef memory;
@@ -129,6 +136,13 @@ struct PageTable {
     std::unordered_map<VAddr, WatchpointPageInfo> watchpoint_pages_map{};
 
     void Clear();
+
+    struct FastmemArenaDeleter {
+        void operator()(FastmemArena* arena) const;
+    };
+    /// Host mirror of `pointers` for the JIT, see MemorySystem::GetFastmemBase(). It lives as long
+    /// as the table, because each JIT built for the table keeps its base.
+    std::unique_ptr<FastmemArena, FastmemArenaDeleter> fastmem;
 
 private:
     template <class Archive>
@@ -692,6 +706,20 @@ public:
 
     /// Unregisters page table for rasterizer cache marking
     void UnregisterPageTable(std::shared_ptr<PageTable> page_table);
+
+    /// Whether guest memory is fd-backed so the JIT can reach it through per-table arenas. Read
+    /// from AZAHAR_FASTMEM=1 when the MemorySystem is built; Linux and Android only.
+    bool IsFastmemEnabled() const;
+
+    /**
+     * Base of the 4 GiB arena that mirrors the table's mapped pages, created on first use.
+     * Pages that need a callback (unmapped, IO, rasterizer-cached, watchpoints, memory not from
+     * the fd) stay inaccessible. Returns nullptr when fastmem is off.
+     */
+    u8* GetFastmemBase(PageTable& page_table);
+
+    /// Remaps every registered table's arena from its pointers, as after loading a state.
+    void RebuildFastmemArenas();
 
     /// Gets pointer to DSP shared memory with given offset
     u8* GetDspMemory(std::size_t offset) const;
