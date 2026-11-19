@@ -362,6 +362,13 @@ std::unique_ptr<Dynarmic::A32::Jit> ARM_Dynarmic::MakeJit() {
     config.callbacks = cb.get();
     if (current_page_table) {
         config.page_table = &current_page_table->GetPointerArray();
+        // Pages without a direct host mapping fault into the callbacks, and the faulting
+        // instruction is recompiled to use the page table.
+        if (u8* fastmem_base = memory.GetFastmemBase(*current_page_table)) {
+            config.fastmem_pointer = reinterpret_cast<uintptr_t>(fastmem_base);
+            config.recompile_on_fastmem_failure = true;
+            config.fastmem_exclusive_access = false;
+        }
     }
     config.coprocessors[15] = std::make_shared<DynarmicCP15>(cp15_state);
     config.define_unpredictable_behaviour = true;

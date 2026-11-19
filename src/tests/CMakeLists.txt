@@ -35,6 +35,11 @@ if (BSD STREQUAL "NetBSD")
     disable_pax_mprotect(tests)
 endif()
 
+if (("x86_64" IN_LIST ARCHITECTURE OR "arm64" IN_LIST ARCHITECTURE) AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(tests PRIVATE core/arm/fastmem_signal.cpp)
+    target_link_libraries(tests PRIVATE dynarmic)
+endif()
+
 target_link_libraries(tests PRIVATE citra_common citra_core video_core audio_core)
 target_link_libraries(tests PRIVATE ${PLATFORM_LIBRARIES} catch2 nihstro-headers Threads::Threads)
 
