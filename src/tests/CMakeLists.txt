@@ -1,6 +1,8 @@
 add_executable(tests
     common/bit_field.cpp
+    common/fastmem_util.h
     common/file_util.cpp
+    common/host_memory.cpp
     common/param_package.cpp
     common/slot_vector.cpp
     core/core_timing.cpp
