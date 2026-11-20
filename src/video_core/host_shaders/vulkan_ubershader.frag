@@ -56,6 +56,21 @@ layout (set = 0, binding = 2, std140) uniform fs_data {
     vec4 blend_color;
 };
 
+// TEV inputs (Pica::Shader::UberTevInput).
+#define TEV_PRIMARY_COLOR 0
+#define TEV_PRIMARY_FRAGMENT_COLOR 1
+#define TEV_SECONDARY_FRAGMENT_COLOR 2
+#define TEV_TEXTURE0 3
+#define TEV_PREVIOUS_BUFFER 7
+#define TEV_CONSTANT 8
+#define TEV_PREVIOUS 9
+
+// Bits 0-3 of a packed TEV stage's z word (Pica::Shader::UberTevFlags).
+#define TEV_ACTIVE 1
+#define TEV_DOT3_RGBA 2
+#define TEV_BUFFER_COLOR 4
+#define TEV_BUFFER_ALPHA 8
+
 // Configuration selectors
 layout (set = 0, binding = 6, std140) uniform fs_config {
     uint cfg_alpha_test_func;       // FramebufferRegs::CompareFunc
@@ -70,7 +85,8 @@ layout (set = 0, binding = 6, std140) uniform fs_config {
     uint cfg_proctex_enable;
     uint cfg_tex_border;            // 3 units x (enable_s | enable_t << 1)
     uint cfg_shadow_flags;          // bit 0 = shadow_texture_orthographic, bit 1 = shadow_rendering
-    uvec4 cfg_tev[NUM_TEV_STAGES];  // x=sources y=modifiers z=ops w=scales
+    uint cfg_tex_used;              // bit n = texture unit n is sampled
+    uvec4 cfg_tev[NUM_TEV_STAGES];  // packed stages, see FSConfigUniformData::tev
     uvec4 cfg_light[2];             // 8 packed Light.raw words
     uvec4 cfg_lut_raw[2];           // 7 packed LutConfig.raw words (d0,d1,sp,fr,rr,rg,rb)
     vec4 cfg_lut_scale[2];          // matching 7 LUT scales
@@ -514,80 +530,50 @@ void do_lighting() {
     g_secondary_fragment_color = clamp(specular_sum, vec4(0.0), vec4(1.0));
 }
 
-// Samples each texture unit that a TEV stage or lighting reads, once per fragment, as the
-// specialized generator does. Sampling inside tev_source() inlined every sampler at each of
-// its call sites, which made the shader ~3x larger and slow to compile on Turnip.
-bool is_passthrough_stage(uint sources, uint modifiers, uint ops, uint scales);
+// Samples each texture unit that a TEV stage or lighting reads (FSConfigUniformData::tex_used),
+// once per fragment, as the specialized generator does. Sampling inside tev_input() inlined every
+// sampler at each of its call sites, which made the shader ~3x larger and slow to compile on Turnip.
 void sample_used_textures() {
-    uint used = 0u;
-    for (int i = 0; i < NUM_TEV_STAGES; ++i) {
-        uvec4 t = cfg_tev[i];
-        if (is_passthrough_stage(t.x, t.y, t.z, t.w)) {
-            continue;
-        }
-        for (int f = 0; f < 3; ++f) {
-            uint cs = bitfieldExtract(t.x, 4 * f, 4);
-            uint as = bitfieldExtract(t.x, 16 + 4 * f, 4);
-            if (cs >= 3u && cs <= 6u) used |= 1u << (cs - 3u);
-            if (as >= 3u && as <= 6u) used |= 1u << (as - 3u);
-        }
-    }
-    if ((cfg_lighting & 1u) != 0u) {
-        uint bump_mode = bitfieldExtract(cfg_lighting, 5, 2);
-        if (bump_mode == 1u || bump_mode == 2u) used |= 1u << bitfieldExtract(cfg_lighting, 7, 2);
-        if ((cfg_lighting & (1u << 17)) != 0u) used |= 1u << bitfieldExtract(cfg_lighting, 22, 2);
-    }
-    g_texcolor[0] = (used & 1u) != 0u ? sampleTexUnit0() : vec4(0.0);
-    g_texcolor[1] = (used & 2u) != 0u ? sampleTexUnit1() : vec4(0.0);
-    g_texcolor[2] = (used & 4u) != 0u ? sampleTexUnit2() : vec4(0.0);
-    g_texcolor[3] = (used & 8u) != 0u ? sampleTexUnit3() : vec4(0.0);
+    g_texcolor[0] = (cfg_tex_used & 1u) != 0u ? sampleTexUnit0() : vec4(0.0);
+    g_texcolor[1] = (cfg_tex_used & 2u) != 0u ? sampleTexUnit1() : vec4(0.0);
+    g_texcolor[2] = (cfg_tex_used & 4u) != 0u ? sampleTexUnit2() : vec4(0.0);
+    g_texcolor[3] = (cfg_tex_used & 8u) != 0u ? sampleTexUnit3() : vec4(0.0);
 }
 
-// TEV stages.
-vec4 tev_source(uint source, int tev_index) {
+// TEV stages. The CPU packs each stage (Pica::Shader::FSConfigUniformData::tev has the layout), so
+// the per-fragment loop reads ready-made inputs, components and modifiers with one bitfield
+// extract each instead of decoding the PICA register fields through switches.
+vec4 tev_input(int source, int tev_index) {
     switch (source) {
-    case 0x0u: return g_rounded_primary_color;
-    case 0x1u: return g_primary_fragment_color;
-    case 0x2u: return g_secondary_fragment_color;
-    case 0x3u: return g_texcolor[0];
-    case 0x4u: return g_texcolor[1];
-    case 0x5u: return g_texcolor[2];
-    case 0x6u: return g_texcolor[3];
-    case 0xdu: return g_combiner_buffer;
-    case 0xeu: return const_color[tev_index];
-    case 0xfu: return g_combiner_output;
+    case TEV_PRIMARY_COLOR: return g_rounded_primary_color;
+    case TEV_PRIMARY_FRAGMENT_COLOR: return g_primary_fragment_color;
+    case TEV_SECONDARY_FRAGMENT_COLOR: return g_secondary_fragment_color;
+    case TEV_TEXTURE0: return g_texcolor[0];
+    case TEV_TEXTURE0 + 1: return g_texcolor[1];
+    case TEV_TEXTURE0 + 2: return g_texcolor[2];
+    case TEV_TEXTURE0 + 3: return g_texcolor[3];
+    case TEV_PREVIOUS_BUFFER: return g_combiner_buffer;
+    case TEV_CONSTANT: return const_color[tev_index];
+    case TEV_PREVIOUS: return g_combiner_output;
     default: return vec4(0.0);
     }
 }
 
-vec3 color_modifier(uint modifier, vec4 v) {
-    switch (modifier) {
-    case 0x0u: return v.rgb;
-    case 0x1u: return vec3(1.0) - v.rgb;
-    case 0x2u: return v.aaa;
-    case 0x3u: return vec3(1.0) - v.aaa;
-    case 0x4u: return v.rrr;
-    case 0x5u: return vec3(1.0) - v.rrr;
-    case 0x8u: return v.ggg;
-    case 0x9u: return vec3(1.0) - v.ggg;
-    case 0xcu: return v.bbb;
-    case 0xdu: return vec3(1.0) - v.bbb;
-    default: return vec3(0.0);
-    }
+// The modifier m is 1 to keep the component, -1 for one minus it, or 0 for 0.
+vec3 tev_color_input(int index, int j) {
+    uvec4 t = cfg_tev[index];
+    vec4 v = tev_input(int(bitfieldExtract(t.x, 4 * j, 4)), index);
+    ivec3 c = ivec3(bitfieldExtract(t.y, 8 * j, 2), bitfieldExtract(t.y, 8 * j + 2, 2),
+                    bitfieldExtract(t.y, 8 * j + 4, 2));
+    float m = float(bitfieldExtract(int(t.z), 8 + 2 * j, 2));
+    return fma(vec3(v[c.x], v[c.y], v[c.z]), vec3(m), vec3(max(-m, 0.0)));
 }
 
-float alpha_modifier(uint modifier, vec4 v) {
-    switch (modifier) {
-    case 0x0u: return v.a;
-    case 0x1u: return 1.0 - v.a;
-    case 0x2u: return v.r;
-    case 0x3u: return 1.0 - v.r;
-    case 0x4u: return v.g;
-    case 0x5u: return 1.0 - v.g;
-    case 0x6u: return v.b;
-    case 0x7u: return 1.0 - v.b;
-    default: return 0.0;
-    }
+float tev_alpha_input(int index, int j) {
+    uvec4 t = cfg_tev[index];
+    vec4 v = tev_input(int(bitfieldExtract(t.x, 16 + 4 * j, 4)), index);
+    float m = float(bitfieldExtract(int(t.z), 14 + 2 * j, 2));
+    return fma(v[bitfieldExtract(t.y, 24 + 2 * j, 2)], m, max(-m, 0.0));
 }
 
 vec3 color_combiner(uint op) {
@@ -630,81 +616,45 @@ float alpha_combiner(uint op) {
     return clamp(result, 0.0, 1.0);
 }
 
-bool is_passthrough_stage(uint sources, uint modifiers, uint ops, uint scales) {
-    uint color_op = bitfieldExtract(ops, 0, 4);
-    uint alpha_op = bitfieldExtract(ops, 16, 4);
-    uint color_src1 = bitfieldExtract(sources, 0, 4);
-    uint alpha_src1 = bitfieldExtract(sources, 16, 4);
-    uint color_mod1 = bitfieldExtract(modifiers, 0, 4);
-    uint alpha_mod1 = bitfieldExtract(modifiers, 12, 3);
-    uint color_scale = bitfieldExtract(scales, 0, 2);
-    uint alpha_scale = bitfieldExtract(scales, 16, 2);
-    return color_op == 0u && alpha_op == 0u && color_src1 == 0xfu && alpha_src1 == 0xfu &&
-           color_mod1 == 0x0u && alpha_mod1 == 0x0u && color_scale == 0u && alpha_scale == 0u;
-}
-
-float scale_multiplier(uint scale) {
-    return (scale < 3u) ? float(1u << scale) : 1.0;
-}
-
 void write_tev_stage(int index) {
-    uint sources = cfg_tev[index].x;
-    uint modifiers = cfg_tev[index].y;
-    uint ops = cfg_tev[index].z;
-    uint scales = cfg_tev[index].w;
-
-    if (!is_passthrough_stage(sources, modifiers, ops, scales)) {
-        uint color_src1 = bitfieldExtract(sources, 0, 4);
-        uint color_src2 = bitfieldExtract(sources, 4, 4);
-        uint color_src3 = bitfieldExtract(sources, 8, 4);
-        uint alpha_src1 = bitfieldExtract(sources, 16, 4);
-        uint alpha_src2 = bitfieldExtract(sources, 20, 4);
-        uint alpha_src3 = bitfieldExtract(sources, 24, 4);
-
-        // Previous reads color/alpha source3.
-        if (index == 0) {
-            if (color_src1 == 0xfu) color_src1 = color_src3;
-            if (color_src2 == 0xfu) color_src2 = color_src3;
-            if (alpha_src1 == 0xfu) alpha_src1 = alpha_src3;
-            if (alpha_src2 == 0xfu) alpha_src2 = alpha_src3;
+    uvec4 t = cfg_tev[index];
+    int flags = int(bitfieldExtract(t.z, 0, 4));
+    if ((flags & TEV_ACTIVE) != 0) {
+        uint color_inputs = bitfieldExtract(t.z, 20, 2);
+        g_color_results_1.rgb = tev_color_input(index, 0);
+        if (color_inputs > 1u) {
+            g_color_results_2.rgb = tev_color_input(index, 1);
         }
-
-        uint color_mod1 = bitfieldExtract(modifiers, 0, 4);
-        uint color_mod2 = bitfieldExtract(modifiers, 4, 4);
-        uint color_mod3 = bitfieldExtract(modifiers, 8, 4);
-        uint alpha_mod1 = bitfieldExtract(modifiers, 12, 3);
-        uint alpha_mod2 = bitfieldExtract(modifiers, 16, 3);
-        uint alpha_mod3 = bitfieldExtract(modifiers, 20, 3);
-
-        uint color_op = bitfieldExtract(ops, 0, 4);
-        uint alpha_op = bitfieldExtract(ops, 16, 4);
-
-        g_color_results_1.rgb = color_modifier(color_mod1, tev_source(color_src1, index));
-        g_color_results_2.rgb = color_modifier(color_mod2, tev_source(color_src2, index));
-        g_color_results_3.rgb = color_modifier(color_mod3, tev_source(color_src3, index));
-        vec3 color_output = byteround(color_combiner(color_op));
+        if (color_inputs > 2u) {
+            g_color_results_3.rgb = tev_color_input(index, 2);
+        }
+        vec3 color_output = byteround(color_combiner(bitfieldExtract(t.x, 12, 4)));
 
         float alpha_output;
-        if (color_op == 7u) { // Dot3_RGBA spills into alpha
+        if ((flags & TEV_DOT3_RGBA) != 0) { // Dot3_RGBA spills into alpha
             alpha_output = color_output[0];
         } else {
-            g_alpha_results_1 = alpha_modifier(alpha_mod1, tev_source(alpha_src1, index));
-            g_alpha_results_2 = alpha_modifier(alpha_mod2, tev_source(alpha_src2, index));
-            g_alpha_results_3 = alpha_modifier(alpha_mod3, tev_source(alpha_src3, index));
-            alpha_output = byteround(alpha_combiner(alpha_op));
+            uint alpha_inputs = bitfieldExtract(t.z, 22, 2);
+            g_alpha_results_1 = tev_alpha_input(index, 0);
+            if (alpha_inputs > 1u) {
+                g_alpha_results_2 = tev_alpha_input(index, 1);
+            }
+            if (alpha_inputs > 2u) {
+                g_alpha_results_3 = tev_alpha_input(index, 2);
+            }
+            alpha_output = byteround(alpha_combiner(bitfieldExtract(t.x, 28, 4)));
         }
 
-        float color_mult = scale_multiplier(bitfieldExtract(scales, 0, 2));
-        float alpha_mult = scale_multiplier(bitfieldExtract(scales, 16, 2));
-        g_combiner_output = vec4(clamp(color_output * color_mult, vec3(0.0), vec3(1.0)),
-                                 clamp(alpha_output * alpha_mult, 0.0, 1.0));
+        g_combiner_output =
+            vec4(clamp(color_output * float(1u << bitfieldExtract(t.z, 4, 2)), vec3(0.0), vec3(1.0)),
+                 clamp(alpha_output * float(1u << bitfieldExtract(t.z, 6, 2)), 0.0, 1.0));
     }
 
     g_combiner_buffer = g_next_combiner_buffer;
-    if (index < 4 && (cfg_combiner_buffer_mask & (1u << uint(index))) != 0u) {
+    if ((flags & TEV_BUFFER_COLOR) != 0) {
         g_next_combiner_buffer.rgb = g_combiner_output.rgb;
     }
-    if (index < 4 && ((cfg_combiner_buffer_mask >> 4) & (1u << uint(index))) != 0u) {
+    if ((flags & TEV_BUFFER_ALPHA) != 0) {
         g_next_combiner_buffer.a = g_combiner_output.a;
     }
 }
