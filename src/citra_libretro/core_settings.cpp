@@ -78,6 +78,7 @@ static constexpr const char* fast_pipeline_linking = "citra_fast_pipeline_linkin
 static constexpr const char* fog_uniform = "citra_fog_uniform";
 static constexpr const char* lean_vertex_shaders = "citra_lean_vertex_shaders";
 static constexpr const char* merge_tev_inputs = "citra_merge_tev_inputs";
+static constexpr const char* early_pipeline_builds = "citra_early_pipeline_builds";
 } // namespace graphics
 
 namespace layout {
@@ -487,6 +488,23 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
         "Fragment shaders whose texture combiner stages differ only in inputs the stage never "
         "reads share one shader. Fewer shaders to compile (A Link Between Worlds builds 7% "
         "fewer pipelines) and the same frames. Restart RetroArch to apply.",
+        nullptr,
+        config::category::graphics,
+        {
+            { config::disabled, "Disabled" },
+            { config::enabled, "Enabled" },
+            { nullptr, nullptr }
+        },
+        config::enabled
+    },
+    {
+        config::graphics::early_pipeline_builds,
+        "Early Pipeline Builds (Vulkan)",
+        "Early Pipeline Builds",
+        "Build a pipeline as soon as its shaders finish compiling when only a quick link is "
+        "left, on a thread of its own, instead of when the game next draws with it. Fewer "
+        "draws stay on the slower ubershader after a burst of new shaders (Super Mario 3D "
+        "Land, Luigi's Mansion 2). Needs Fast Pipeline Linking. Restart RetroArch to apply.",
         nullptr,
         config::category::graphics,
         {
@@ -1233,6 +1251,13 @@ static void ParseGraphicsOptions(void) {
         const bool merge = LibRetro::FetchVariable(config::graphics::merge_tev_inputs,
                                                    config::enabled) == config::enabled;
         SetPocSwitch("AZAHAR_FS_TEV_NORMALIZE", merge ? "1" : "0");
+
+        // Read once by Vulkan::PocChainBuildMode() and Vulkan::PocShortFirstMode()
+        // (vk_graphics_pipeline.cpp); unset = off.
+        const bool early = LibRetro::FetchVariable(config::graphics::early_pipeline_builds,
+                                                   config::enabled) == config::enabled;
+        SetPocSwitch("AZAHAR_CHAIN_BUILD", early ? "short" : nullptr);
+        SetPocSwitch("AZAHAR_SHORT_FIRST", early ? "own" : nullptr);
 
         // Read when System::Init() builds the MemorySystem (src/core/memory.cpp); unset = off.
         const bool fastmem =
