@@ -3,6 +3,7 @@
 // Refer to the LICENSE.txt file included.
 
 #include <cstdlib>
+#include <fmt/ranges.h>
 #include <optional>
 #include <string_view>
 #include <time.h>
@@ -195,6 +196,8 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
              "fallback: {}, worker nice: {})",
              use_ubershaders, ubershader_cpu_vertex, force_ubershader, ubershader_small_draws,
              skip_unready_fallback, worker_nice ? worker_nice : "unset");
+    LOG_INFO(Render_Vulkan, "PoC pipeline queueing: chain build: {}, short first: {}",
+             PocChainBuildMode(), PocShortFirstMode());
 }
 
 RasterizerVulkan::~RasterizerVulkan() {
@@ -252,13 +255,16 @@ void RasterizerVulkan::LogSlowFrame(std::chrono::steady_clock::time_point now) {
             LOG_INFO(Render_Vulkan,
                      "Slow frame: frame={} tid={} start_ns={} end_ns={} wall={:.1f}ms cpu={:.1f}ms "
                      "draw={:.1f}ms draws={} uber_draws={} wait_worker={:.1f}ms "
-                     "pipeline_wait={:.1f}ms runq={:.1f}ms vcsw={} ivcsw={}",
+                     "pipeline_wait={:.1f}ms runq={:.1f}ms vcsw={} ivcsw={} "
+                     "uwait_small={} uwait_big={}",
                      uber_stats.frames, static_cast<long>(gettid()), start_ns, end_ns,
                      (end_ns - start_ns) / 1e6, (cpu_ns - last_frame_cpu_ns) / 1e6,
                      frame_stats.draw_ns / 1e6, frame_stats.draws, frame_stats.uber_draws,
                      frame_stats.wait_worker_ns / 1e6,
                      (pipeline_wait_ns - last_pipeline_wait_ns) / 1e6,
-                     (sched_runq_ns - last_runq_ns) / 1e6, vcsw - last_vcsw, ivcsw - last_ivcsw);
+                     (sched_runq_ns - last_runq_ns) / 1e6, vcsw - last_vcsw, ivcsw - last_ivcsw,
+                     fmt::join(frame_stats.uber_wait[1], "/"),
+                     fmt::join(frame_stats.uber_wait[0], "/"));
         }
     }
     last_frame_cpu_ns = cpu_ns;
@@ -879,6 +885,11 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
             ++uber_stats.unsupported_by_gap[static_cast<std::size_t>(gap)];
             force_wait = true;
         } else {
+            if (GraphicsPipeline* const specialized = pipeline_cache.LastReadyCheck();
+                specialized && !specialized->IsDone()) {
+                ++frame_stats.uber_wait[regs.pipeline.num_vertices <= 6 ? 1 : 0]
+                                       [static_cast<std::size_t>(specialized->PocCurrentWaitState())];
+            }
             pipeline_cache.UseUbershaderFragmentShader();
             if (!ubershader_cpu_vertex && pipeline_cache.IsPipelineReady(pipeline_info)) {
                 // GPU vertex path: the game's vertex shader with the ubershader on the GPU.

@@ -189,6 +189,9 @@ private:
             shader_workers.QueueWork(std::forward<Work>(work));
         }
     }
+    Common::ThreadWorker* PocShortWorkers() {
+        return short_workers.NumWorkers() > 0 ? &short_workers : nullptr;
+    }
     Common::ThreadWorker& UberPipelineWorkers() {
         return priority_workers.NumWorkers() > 0 ? priority_workers : pipeline_workers;
     }
@@ -262,6 +265,10 @@ private:
     // their own N workers, so they don't queue behind specialized work. AZAHAR_UBER_FIRST=front
     // queues them ahead of other work on the existing workers instead. Unset = upstream.
     Common::ThreadWorker priority_workers;
+    // PoC (AZAHAR_SHORT_FIRST=own): one worker for specialized pipelines whose vertex library is
+    // already built (GraphicsPipeline::PocIsShortBuild()), so they don't wait behind vertex
+    // library compiles. No threads otherwise.
+    Common::ThreadWorker short_workers;
     bool uber_first_front;
     PipelineInfo current_info{};
     GraphicsPipeline* current_pipeline{};

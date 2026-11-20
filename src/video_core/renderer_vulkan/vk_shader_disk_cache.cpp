@@ -367,6 +367,7 @@ GraphicsPipeline* ShaderDiskCache::GetPipeline(const PipelineInfo& info) {
             uber_fs ? &parent.UberPipelineWorkers() : &parent.pipeline_workers);
         it.value()->SetPriority(uber_fs && parent.uber_first_front);
         it.value()->SetPocUber(uber_fs);
+        it.value()->SetPocShortWorker(parent.PocShortWorkers());
     }
 
     // Ubershader pipelines are transient stand-ins; their FS hash is not a cached shader, so an

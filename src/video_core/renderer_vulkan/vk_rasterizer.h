@@ -213,6 +213,10 @@ private:
         u64 draws{};
         u64 uber_draws{};
         u64 wait_worker_ns{};
+        // Draws that took the ubershader, by what their specialized pipeline was waiting for
+        // (GraphicsPipeline::PocWaitState); [1] = draws of 6 or fewer vertices.
+        std::array<std::array<u32, static_cast<std::size_t>(GraphicsPipeline::PocWaitState::Count)>, 2>
+            uber_wait{};
     } frame_stats;
     u64 last_frame_cpu_ns{};
     u64 last_pipeline_wait_ns{};

@@ -125,7 +125,9 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
       num_worker_threads{PipelineWorkerCount()},
       pipeline_workers{num_worker_threads, "Pipeline workers"},
       shader_workers{num_worker_threads, "Shader workers"},
-      priority_workers{PriorityWorkerCount(), "Priority workers"}, uber_first_front{UberFirstFront()},
+      priority_workers{PriorityWorkerCount(), "Priority workers"},
+      short_workers{PocShortFirstMode() == 2 ? std::size_t{1} : std::size_t{0}, "Short pipeline workers"},
+      uber_first_front{UberFirstFront()},
       descriptor_heaps{
           DescriptorHeap{instance, scheduler.GetMasterSemaphore(), BUFFER_BINDINGS, 32},
           DescriptorHeap{instance, scheduler.GetMasterSemaphore(), TEXTURE_BINDINGS<1>},
@@ -193,9 +195,15 @@ void PipelineCache::BuildLayout() {
 }
 
 PipelineCache::~PipelineCache() {
-    pipeline_workers.WaitForRequests();
+    // A shader's compile thread can queue pipeline builds (AZAHAR_CHAIN_BUILD=1), and a parked
+    // build is re-queued by another pool's thread, so drain the shader threads first and the
+    // pipeline pools twice.
     shader_workers.WaitForRequests();
-    priority_workers.WaitForRequests();
+    for (int pass = 0; pass < 2; ++pass) {
+        priority_workers.WaitForRequests();
+        pipeline_workers.WaitForRequests();
+        short_workers.WaitForRequests();
+    }
     SaveDriverPipelineDiskCache();
 }
 

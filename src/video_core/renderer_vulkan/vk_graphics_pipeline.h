@@ -6,6 +6,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -37,12 +39,33 @@ public:
     }
 
     void MarkDone(bool done = true) noexcept {
+        std::vector<std::function<void()>> callbacks;
+        {
+            std::scoped_lock lock{mutex};
+            is_done = done;
+            condvar.notify_all();
+            if (done) {
+                callbacks.swap(poc_on_done);
+            }
+        }
+        for (const auto& callback : callbacks) {
+            callback();
+        }
+    }
+
+    // PoC (AZAHAR_CHAIN_BUILD=1): runs callback once, on the thread that calls MarkDone().
+    // Returns false without keeping it when the handle is already done.
+    bool PocOnDone(std::function<void()> callback) {
         std::scoped_lock lock{mutex};
-        is_done = done;
-        condvar.notify_all();
+        if (is_done.load(std::memory_order::relaxed)) {
+            return false;
+        }
+        poc_on_done.push_back(std::move(callback));
+        return true;
     }
 
 private:
+    std::vector<std::function<void()>> poc_on_done;
     std::condition_variable condvar;
     std::mutex mutex;
     std::atomic_bool is_done{false};
@@ -328,6 +351,18 @@ struct Shader : public Common::AsyncHandle {
 // PoC (AZAHAR_PREWARM_RGB565=1), see vk_graphics_pipeline.cpp.
 bool PocPrewarmRgb565Enabled();
 
+// PoC (AZAHAR_CHAIN_BUILD=1|short): a pipeline whose shaders are still compiling queues its build
+// from the thread that finishes the last shader, instead of when a later draw asks for it again.
+// short chains only builds that are short by then (GraphicsPipeline::PocIsShortBuild()).
+// 0 = off, 1 = every build, 2 = short builds.
+int PocChainBuildMode();
+bool PocChainBuildEnabled();
+
+// PoC (AZAHAR_SHORT_FIRST=1|own): a specialized pipeline whose vertex library is already built
+// only needs its fragment library and a link. 1 queues it ahead of other work on its worker,
+// own gives such builds one worker of their own. 0 = off.
+int PocShortFirstMode();
+
 class GraphicsPipeline : public Common::AsyncHandle {
 public:
     explicit GraphicsPipeline(const Instance& instance, RenderManager& renderpass_cache,
@@ -355,9 +390,16 @@ public:
         poc_fragment_only = fragment_only;
     }
 
+    // PoC (AZAHAR_SHORT_FIRST=own): the worker for short builds. Null = use the queue front.
+    void SetPocShortWorker(Common::ThreadWorker* short_worker) noexcept {
+        poc_short_worker = short_worker;
+    }
+
     // PoC: what a draw that handed off to the CPU vertex path was waiting for.
     enum class PocWaitState : u8 { VsPending, FsPending, GsPending, Queued, Building, Count };
     PocWaitState PocNoteHandoff() noexcept;
+    // What this pipeline is waiting for now. Call from the thread that calls TryBuild().
+    PocWaitState PocCurrentWaitState() noexcept;
 
     // PoC GPL: destroys every shared vertex and fragment library and empties the map.
     static void PocDestroyLibraries(vk::Device device);
@@ -372,11 +414,17 @@ private:
     void PocLogStats() const;
     void PocBuildIfUnclaimed();
     void PocRunBuildTask();
+    void PocQueueWhenShadersDone();
+    void PocQueueBuild();
+    bool PocIsShortBuild();
+    u64 PocVertexLibraryKey() const;
 
     // PoC GPL: vertex and fragment libraries, each shared across pipelines and threads by key.
     struct PocLibrary {
         std::mutex mutex;
         vk::Pipeline pipeline{};
+        // Set once `pipeline` holds the library; readable without `mutex`.
+        std::atomic<bool> built{};
         // AZAHAR_GPL_PARK=1: pipelines whose worker found `mutex` held by another thread.
         // PocUnlockLibrary() re-queues them.
         std::mutex waiters_mutex;
@@ -408,6 +456,14 @@ private:
     std::atomic<u32> poc_handoffs{};
     bool poc_uber{};
     bool poc_fragment_only{};
+    std::atomic<bool> poc_chained{};
+    // AZAHAR_CHAIN_BUILD=short: set by the thread that finished the shaders when it left the build
+    // unqueued; TryBuild() clears it together with is_pending.
+    std::atomic<bool> poc_chain_declined{};
+    // Set by TryBuild(true) when it returns to a caller that blocks on a pending pipeline.
+    std::atomic<bool> poc_wait_requested{};
+    std::atomic<bool> poc_short{};
+    Common::ThreadWorker* poc_short_worker{};
 
     const Instance& instance;
     RenderManager& renderpass_cache;

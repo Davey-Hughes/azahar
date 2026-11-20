@@ -51,6 +51,28 @@ bool PocPrewarmRgb565Enabled() {
     return enabled;
 }
 
+int PocChainBuildMode() {
+    static const int mode = [] {
+        const char* const env = std::getenv("AZAHAR_CHAIN_BUILD");
+        const std::string_view value = env ? env : "";
+        return value == "1" ? 1 : value == "short" ? 2 : 0;
+    }();
+    return mode;
+}
+
+bool PocChainBuildEnabled() {
+    return PocChainBuildMode() != 0;
+}
+
+int PocShortFirstMode() {
+    static const int mode = [] {
+        const char* const env = std::getenv("AZAHAR_SHORT_FIRST");
+        const std::string_view value = env ? env : "";
+        return value == "1" ? 1 : value == "own" ? 2 : 0;
+    }();
+    return mode;
+}
+
 vk::ShaderStageFlagBits MakeShaderStage(std::size_t index) {
     switch (index) {
     case 0:
@@ -174,15 +196,28 @@ bool GraphicsPipeline::TryBuild(bool wait_built) {
     // or skip the draw.
     if (is_pending) {
         if (wait_built) {
-            PocBuildIfUnclaimed();
+            // The caller blocks on this pipeline, so a chain that has not decided yet must queue it
+            // (PocQueueWhenShadersDone()). Store, then read the other flag: one side sees the other.
+            poc_wait_requested.store(true);
         }
-        return wait_built;
+        if (!poc_chain_declined.exchange(false)) {
+            if (wait_built) {
+                PocBuildIfUnclaimed();
+            }
+            return wait_built;
+        }
+        // AZAHAR_CHAIN_BUILD=short left this build to the path below. Its shaders are done.
+        is_pending = false;
     }
 
     // If the shaders haven't been compiled yet, we cannot proceed.
     const bool shaders_pending = std::any_of(
         stages.begin(), stages.end(), [](Shader* shader) { return shader && !shader->IsDone(); });
     if (!wait_built && shaders_pending) {
+        if (PocChainBuildEnabled()) {
+            is_pending = true;
+            PocQueueWhenShadersDone();
+        }
         return false;
     }
 
@@ -198,11 +233,7 @@ bool GraphicsPipeline::TryBuild(bool wait_built) {
 
     // Fallback to (a)synchronous compilation
     poc_queued = PocClock::now();
-    if (priority) {
-        worker->QueuePriorityWork([this] { PocRunBuildTask(); });
-    } else {
-        worker->QueueWork([this] { PocRunBuildTask(); });
-    }
+    PocQueueBuild();
     is_pending = true;
     if (wait_built) {
         PocBuildIfUnclaimed();
@@ -232,11 +263,74 @@ void GraphicsPipeline::PocRunBuildTask() {
 void GraphicsPipeline::PocRequeue() {
     poc_started.store(false, std::memory_order_relaxed);
     poc_build_claimed.store(false, std::memory_order_release);
-    if (priority) {
+    PocQueueBuild();
+}
+
+void GraphicsPipeline::PocQueueWhenShadersDone() {
+    // Runs on the thread that calls TryBuild() and then on the threads that finish the shaders.
+    for (Shader* const shader : stages) {
+        if (shader && shader->PocOnDone([this] { PocQueueWhenShadersDone(); })) {
+            return;
+        }
+    }
+    if (PocChainBuildMode() == 2 && !PocIsShortBuild()) {
+        // Not short (its vertex library is not built, or this pipeline is the one that compiles
+        // it): hand it back, and TryBuild() queues it when a later draw asks, as without the chain.
+        poc_chain_declined.store(true);
+        if (!poc_wait_requested.load() || !poc_chain_declined.exchange(false)) {
+            return;
+        }
+        // A draw already waits for this pipeline and will not ask again: queue it after all.
+    }
+    poc_chained.store(true, std::memory_order_relaxed);
+    poc_queued = PocClock::now();
+    PocQueueBuild();
+}
+
+void GraphicsPipeline::PocQueueBuild() {
+    const int short_mode = PocShortFirstMode();
+    const bool is_short = short_mode != 0 && PocIsShortBuild();
+    poc_short.store(is_short, std::memory_order_relaxed);
+    // The CPU vertex path's pipeline (trivial VS + ubershader). A draw that finds it missing is
+    // skipped (AZAHAR_SKIP_UNREADY_FALLBACK=1), and these toggles put more work in front of it.
+    const bool urgent =
+        poc_uber && info.state.shader_ids[0] == 0 && (short_mode != 0 || PocChainBuildEnabled());
+    if (is_short && short_mode == 2 && poc_short_worker) {
+        poc_short_worker->QueueWork([this] { PocRunBuildTask(); });
+    } else if (priority || is_short || urgent) {
         worker->QueuePriorityWork([this] { PocRunBuildTask(); });
     } else {
         worker->QueueWork([this] { PocRunBuildTask(); });
     }
+}
+
+bool GraphicsPipeline::PocIsShortBuild() {
+    // The ubershader pipeline of a vertex shader is the one that compiles its vertex library
+    // (100-360 ms on Turnip); a specialized pipeline that finds the library built has only a
+    // fragment library (a few ms) and a link left.
+    if (poc_uber || poc_fragment_only || !instance.IsPocUberGplEnabled() ||
+        !instance.IsPocSpecGplEnabled()) {
+        return false;
+    }
+    const bool shaders_pending = std::any_of(
+        stages.begin(), stages.end(), [](Shader* shader) { return shader && !shader->IsDone(); });
+    if (shaders_pending) {
+        return false;
+    }
+    return PocGetLibrary(PocVertexLibraryKey()).built.load(std::memory_order_acquire);
+}
+
+u64 GraphicsPipeline::PocVertexLibraryKey() const {
+    // Needs the shader modules, so every stage must be done.
+    const auto module_key = [](Shader* shader) {
+        return shader ? reinterpret_cast<u64>(static_cast<VkShaderModule>(shader->Handle()))
+                      : u64{0};
+    };
+    return Common::HashCombine(
+        u64{0x56455254}, module_key(stages[0]), module_key(stages[2]),
+        Common::ComputeStructHash64(info.state.vertex_layout),
+        Common::ComputeStructHash64(info.state.attachments),
+        static_cast<u64>(PicaToVK::PrimitiveTopology(info.state.rasterization.topology)));
 }
 
 GraphicsPipeline::PocLock GraphicsPipeline::PocLockLibrary(PocLibrary& library, bool try_only) {
@@ -576,15 +670,7 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         // same VS, GS, vertex layout, attachments and topology. Cull mode, front face and the
         // topology itself are dynamic (EDS), so only the topology class matters; keeping the
         // topology in the key is conservative.
-        const auto module_key = [](Shader* shader) {
-            return shader ? reinterpret_cast<u64>(static_cast<VkShaderModule>(shader->Handle()))
-                          : u64{0};
-        };
-        const u64 vertex_key = Common::HashCombine(
-            u64{0x56455254}, module_key(stages[0]), module_key(stages[2]),
-            Common::ComputeStructHash64(info.state.vertex_layout),
-            Common::ComputeStructHash64(info.state.attachments),
-            static_cast<u64>(input_assembly.topology));
+        const u64 vertex_key = PocVertexLibraryKey();
         PocLibrary& vertex = PocGetLibrary(vertex_key);
         {
             if (PocLockLibrary(vertex, fail_on_compile_required) != PocLock::Acquired) {
@@ -606,6 +692,7 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
                            "PoC GPL vertex library creation failed");
                 // Never destroyed, like the fragment libraries.
                 vertex.pipeline = vertex_result.value;
+                vertex.built.store(true, std::memory_order_release);
                 LOG_INFO(Render_Vulkan,
                          "PoC GPL vertex library: key={:016x} vs={:016x} gs={:016x} "
                          "color={} depth={} ms={:.1f}",
@@ -708,10 +795,11 @@ void GraphicsPipeline::PocLogStats() const {
 
 GraphicsPipeline::PocWaitState GraphicsPipeline::PocNoteHandoff() noexcept {
     poc_handoffs.fetch_add(1, std::memory_order_relaxed);
-    if (is_pending) {
-        return poc_started.load(std::memory_order_relaxed) ? PocWaitState::Building
-                                                           : PocWaitState::Queued;
-    }
+    return PocCurrentWaitState();
+}
+
+GraphicsPipeline::PocWaitState GraphicsPipeline::PocCurrentWaitState() noexcept {
+    // A chained pipeline is pending while its shaders still compile, so look at them first.
     // stages[] is indexed by Pica::Shader::Generator::ProgramType: VS, FS, GS.
     static constexpr std::array pending_state{PocWaitState::VsPending, PocWaitState::FsPending,
                                               PocWaitState::GsPending};
@@ -719,6 +807,10 @@ GraphicsPipeline::PocWaitState GraphicsPipeline::PocNoteHandoff() noexcept {
         if (stages[i] && !stages[i]->IsDone()) {
             return pending_state[i];
         }
+    }
+    if (is_pending) {
+        return poc_started.load(std::memory_order_relaxed) ? PocWaitState::Building
+                                                           : PocWaitState::Queued;
     }
     return PocWaitState::Queued;
 }
@@ -763,14 +855,15 @@ void GraphicsPipeline::PocLogBuild(PocClock::time_point start, PocClock::time_po
         "PoC pipeline built: uber={} fast={} vs={:016x} wait_shaders_ms={:.0f} "
         "queued_ms={:.0f} build_ms={:.1f} handoffs={} gpl_frag_ms={:.0f} gpl_vert_ms={:.1f} "
         "gpl_link_ms={:.1f} layout={:016x} color={} depth={} samples={} blend={} "
-        "logic_op={} gs={:016x} on_wait={} parks={}",
+        "logic_op={} gs={:016x} on_wait={} parks={} chained={} short={}",
         poc_uber, fast, state.shader_ids[0], Ms(poc_queued - poc_created).count(),
         Ms(start - poc_queued).count(), Ms(end - start).count(),
         poc_handoffs.load(std::memory_order_relaxed), poc_gpl_ms[0], poc_gpl_ms[1], poc_gpl_ms[2],
         Common::ComputeStructHash64(state.vertex_layout), static_cast<u32>(state.attachments.color),
         static_cast<u32>(state.attachments.depth), state.attachments.sample_count,
         state.blending.blend_enable, static_cast<u32>(state.blending.logic_op), state.shader_ids[2],
-        poc_wait_mode.load(std::memory_order_relaxed), poc_parks.load(std::memory_order_relaxed));
+        poc_wait_mode.load(std::memory_order_relaxed), poc_parks.load(std::memory_order_relaxed),
+        poc_chained.load(std::memory_order_relaxed), poc_short.load(std::memory_order_relaxed));
 }
 
 } // namespace Vulkan
