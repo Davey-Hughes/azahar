@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <memory>
+#include <span>
 #include "common/common_types.h"
 #include "core/hle/service/gsp/gsp_interrupt.h"
 #include "video_core/pica/dirty_regs.h"
@@ -142,6 +144,23 @@ private:
     void DrawArrays(bool is_indexed);
 
     void LoadVertices(bool is_indexed);
+
+    // Personal build: parallel CPU vertex shading behind AZAHAR_VERTEX_THREADS, in
+    // src/video_core/pica/pica_core_vertex_threads.cpp.
+    struct VertexThreadsState;
+    struct VertexThreadsDeleter {
+        void operator()(VertexThreadsState* state) const;
+    };
+
+    /// Creates vertex_threads when AZAHAR_VERTEX_THREADS asks for 2 or more threads.
+    void InitVertexThreads();
+
+    /// Shades the draw's unique vertices on the emu thread and the workers, then submits every
+    /// index in order. Returns false, with nothing changed, when the draw takes the serial loop.
+    bool LoadVerticesParallel(bool is_indexed);
+
+    /// Check mode: the LoadVertices() loop, writing each index's vertex to out.
+    void ShadeSerialReference(bool is_indexed, std::span<OutputVertex> out);
 
 public:
     union Regs {
@@ -413,6 +432,7 @@ private:
     PrimitiveAssembler primitive_assembler;
     CommandList cmd_list;
     std::unique_ptr<ShaderEngine> shader_engine;
+    std::unique_ptr<VertexThreadsState, VertexThreadsDeleter> vertex_threads;
 };
 
 #define GPU_REG_INDEX(field_name) (offsetof(Pica::PicaCore::Regs, field_name) / sizeof(u32))

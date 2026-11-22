@@ -87,6 +87,8 @@ PicaCore::PicaCore(Memory::MemorySystem& memory_, std::shared_ptr<DebugContext> 
     geometry_pipeline.SetVertexHandler(submit_vertex);
 
     primitive_assembler.Reconfigure(PipelineRegs::TriangleTopology::List);
+
+    InitVertexThreads();
 }
 
 PicaCore::~PicaCore() = default;
@@ -1095,6 +1097,10 @@ void PicaCore::DrawArrays(bool is_indexed) {
 }
 
 void PicaCore::LoadVertices(bool is_indexed) {
+    if (vertex_threads && LoadVerticesParallel(is_indexed)) {
+        return;
+    }
+
     // Read and validate vertex information from the loaders
     const auto& pipeline = regs.internal.pipeline;
     const PAddr base_address = pipeline.vertex_attributes.GetPhysicalBaseAddress();

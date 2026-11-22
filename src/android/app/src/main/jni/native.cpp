@@ -281,6 +281,11 @@ static void ImportPocTogglesFromProperties() {
         "AZAHAR_FS_TEV_NORMALIZE",
         // Read when System::Init() builds the MemorySystem, which follows this import.
         "AZAHAR_FASTMEM",
+        "AZAHAR_VERTEX_THREADS",
+        "AZAHAR_VERTEX_THREADS_MIN",
+        "AZAHAR_VERTEX_THREADS_CHECK",
+        "AZAHAR_VERTEX_THREADS_NICE",
+        "AZAHAR_VERTEX_THREADS_SPIN_US",
     };
     for (const char* name : names) {
         const std::string prop = "debug." + Common::ToLower(name);

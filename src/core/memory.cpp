@@ -1161,6 +1161,11 @@ u8* MemorySystem::GetPhysicalPointer(PAddr address) {
     return target_mem.backing_mem->get()->GetPtr() + offset_into_region;
 }
 
+PAddr MemorySystem::GetPhysicalRegionEnd(PAddr address) {
+    const auto info = GetPhysMemRegionInfo(address);
+    return info.valid() ? info.region_end : 0;
+}
+
 MemoryRef MemorySystem::GetPhysicalRef(PAddr address) {
     const auto& target_mem = GetPhysMemRegionInfo(address);
 

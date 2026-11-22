@@ -680,6 +680,11 @@ public:
     /// Gets a pointer to the memory region beginning at the specified physical address.
     u8* GetPhysicalPointer(PAddr address);
 
+    /// Returns the exclusive end of the physical memory region holding `address`, or 0 if it is
+    /// unmapped. Unlike GetPhysicalPointer(), the one-past-end address is not part of the region.
+    /// Emu thread only.
+    PAddr GetPhysicalRegionEnd(PAddr address);
+
     /// Returns a reference to the memory region beginning at the specified physical address
     MemoryRef GetPhysicalRef(PAddr address);
 

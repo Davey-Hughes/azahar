@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include "core/memory.h"
 #include "video_core/pica/output_vertex.h"
 #include "video_core/pica/regs_pipeline.h"
@@ -14,6 +15,12 @@ class MemorySystem;
 
 namespace Pica {
 
+/// Host pointer of each loaded attribute array at vertex 0, resolved once per draw on the emu
+/// thread. Null for default or empty attributes.
+struct VertexArrays {
+    std::array<const u8*, 16> base{};
+};
+
 class VertexLoader {
 public:
     explicit VertexLoader(Memory::MemorySystem& memory_, const PipelineRegs& regs);
@@ -21,6 +28,15 @@ public:
 
     void LoadVertex(PAddr base_address, u32 index, u32 vertex, AttributeBuffer& input,
                     AttributeBuffer& input_default_attributes) const;
+
+    /// Resolves each attribute array through memory. Returns false if an array is unmapped or
+    /// not contiguous in host memory up to max_vertex.
+    bool ResolveArrays(PAddr base_address, u32 max_vertex, VertexArrays& out) const;
+
+    /// Same as LoadVertex() above, but reads only through `arrays`; never touches memory, so it
+    /// is safe to call from worker threads.
+    void LoadVertex(const VertexArrays& arrays, u32 vertex, AttributeBuffer& input,
+                    const AttributeBuffer& input_default_attributes) const;
 
     template <typename T>
     void LoadAttribute(PAddr source_addr, u32 attrib, AttributeBuffer& out) const {

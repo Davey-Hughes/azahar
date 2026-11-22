@@ -25,6 +25,7 @@ add_library(video_core STATIC EXCLUDE_FROM_ALL
     pica/geometry_pipeline.h
     pica/pica_core.cpp
     pica/pica_core.h
+    pica/pica_core_vertex_threads.cpp
     pica/output_vertex.cpp
     pica/output_vertex.h
     pica/primitive_assembly.cpp
@@ -44,8 +45,14 @@ add_library(video_core STATIC EXCLUDE_FROM_ALL
     pica/shader_unit.cpp
     pica/shader_unit.h
     pica/packed_attribute.h
+    pica/vertex_dedupe.cpp
+    pica/vertex_dedupe.h
     pica/vertex_loader.cpp
     pica/vertex_loader.h
+    pica/vertex_threads.cpp
+    pica/vertex_threads.h
+    pica/vertex_worker_pool.cpp
+    pica/vertex_worker_pool.h
     rasterizer_cache/framebuffer_base.h
     rasterizer_cache/pixel_format.cpp
     rasterizer_cache/pixel_format.h
