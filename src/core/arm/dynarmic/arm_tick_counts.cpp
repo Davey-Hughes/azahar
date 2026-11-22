@@ -2,8 +2,10 @@
 // Licensed under GPLv2 or any later version
 // Refer to the misc/licenses/gplv2.txt file included.
 
+#include <algorithm>
+#include <array>
 #include <bit>
-#include <functional>
+#include <vector>
 #include "common/common_types.h"
 #include "common/string_literal.h"
 #include "core/arm/dynarmic/arm_tick_counts.h"
@@ -49,7 +51,48 @@ struct MatcherArg {
 struct Matcher {
     u32 mask;
     u32 expect;
-    std::function<u64(u32)> fn;
+    u64 (*fn)(u32);
+};
+
+// Finds the first matcher in a table that matches an instruction without walking the whole table.
+// The matchers are put in buckets keyed on a few fixed opcode bits: each bucket lists, in table
+// order, the matchers that can match an instruction with that key, so the first match in a bucket
+// is the first match in the table.
+template <std::size_t key_bits, u32 (*key_of)(u32)>
+class MatcherLookup {
+public:
+    template <std::size_t N>
+    explicit MatcherLookup(const std::array<Matcher, N>& table) : matchers{table.data()} {
+        static_assert(N <= 256, "matcher indices are stored as u8");
+        for (u32 key = 0; key < num_keys; key++) {
+            bucket_start[key] = static_cast<u32>(indices.size());
+            for (std::size_t m = 0; m < N; m++) {
+                // key_of only moves bits, so it also gives the key bits of a mask or a pattern
+                if (((key_of(table[m].expect) ^ key) & key_of(table[m].mask)) == 0) {
+                    indices.push_back(static_cast<u8>(m));
+                }
+            }
+        }
+        bucket_start[num_keys] = static_cast<u32>(indices.size());
+    }
+
+    const Matcher* Find(u32 instruction) const {
+        const u32 key = key_of(instruction);
+        for (u32 i = bucket_start[key]; i < bucket_start[key + 1]; i++) {
+            const Matcher& matcher = matchers[indices[i]];
+            if ((instruction & matcher.mask) == matcher.expect) {
+                return &matcher;
+            }
+        }
+        return nullptr;
+    }
+
+private:
+    static constexpr u32 num_keys = 1U << key_bits;
+
+    const Matcher* matchers;
+    std::array<u32, num_keys + 1> bucket_start{};
+    std::vector<u8> indices;
 };
 
 // pipeline flush cost for a PC write that program flow prediction cannot handle
@@ -144,11 +187,10 @@ u64 VfpLoadStore(auto i) {
 
 #define INST(NAME, BS, CYCLES)                                                                     \
     Matcher{GetMatchingBitsFromStringLiteral<BS, "01">(),                                          \
-            GetMatchingBitsFromStringLiteral<BS, "1">(),                                           \
-            std::function<u64(u32)>{[](u32 instruction) -> u64 {                                   \
+            GetMatchingBitsFromStringLiteral<BS, "1">(), [](u32 instruction) -> u64 {              \
                 [[maybe_unused]] MatcherArg<BS> i{instruction};                                    \
                 return (CYCLES);                                                                   \
-            }}},
+            }},
 
 const std::array arm_matchers{
     // clang-format off
@@ -545,40 +587,42 @@ const std::array thumb32_matchers{
     // clang-format on
 };
 
+// ARM instructions are bucketed on bits 27:20 and 7:4, 16-bit Thumb ones on bits 15:6
+u32 ArmKey(u32 instruction) {
+    return ((instruction >> 16) & 0xFF0) | ((instruction >> 4) & 0xF);
+}
+u32 Thumb16Key(u32 instruction) {
+    return (instruction >> 6) & 0x3FF;
+}
+
+const MatcherLookup<12, ArmKey> arm_lookup{arm_matchers};
+const MatcherLookup<10, Thumb16Key> thumb16_lookup{thumb16_matchers};
+
 } // namespace
 
 namespace Core {
 
 u64 TicksForInstruction(bool is_thumb, u32 instruction) {
-    const auto matches_instruction = [instruction](const auto& matcher) {
-        return (instruction & matcher.mask) == matcher.expect;
-    };
-
     if (is_thumb) {
         // dynarmic passes 16-bit Thumb instructions zero-extended and 32-bit ones
         // (BL/BLX prefix+suffix pairs on ARMv6) with the first halfword in the
         // upper 16 bits
         if ((instruction >> 16) != 0) {
-            auto iter =
-                std::find_if(thumb32_matchers.begin(), thumb32_matchers.end(), matches_instruction);
+            auto iter = std::find_if(thumb32_matchers.begin(), thumb32_matchers.end(),
+                                     [instruction](const Matcher& matcher) {
+                                         return (instruction & matcher.mask) == matcher.expect;
+                                     });
             if (iter != thumb32_matchers.end()) {
                 return iter->fn(instruction);
             }
             return 1;
         }
-        auto iter =
-            std::find_if(thumb16_matchers.begin(), thumb16_matchers.end(), matches_instruction);
-        if (iter != thumb16_matchers.end()) {
-            return iter->fn(instruction);
-        }
-        return 1;
+        const Matcher* matcher = thumb16_lookup.Find(instruction);
+        return matcher ? matcher->fn(instruction) : 1;
     }
 
-    auto iter = std::find_if(arm_matchers.begin(), arm_matchers.end(), matches_instruction);
-    if (iter != arm_matchers.end()) {
-        return iter->fn(instruction);
-    }
-    return 1;
+    const Matcher* matcher = arm_lookup.Find(instruction);
+    return matcher ? matcher->fn(instruction) : 1;
 }
 
 } // namespace Core
