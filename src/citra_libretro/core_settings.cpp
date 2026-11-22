@@ -79,6 +79,7 @@ static constexpr const char* fog_uniform = "citra_fog_uniform";
 static constexpr const char* lean_vertex_shaders = "citra_lean_vertex_shaders";
 static constexpr const char* merge_tev_inputs = "citra_merge_tev_inputs";
 static constexpr const char* early_pipeline_builds = "citra_early_pipeline_builds";
+static constexpr const char* vertex_threads = "citra_vertex_threads";
 } // namespace graphics
 
 namespace layout {
@@ -513,6 +514,24 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
             { nullptr, nullptr }
         },
         config::enabled
+    },
+    {
+        config::graphics::vertex_threads,
+        "Parallel CPU Vertex Shading",
+        "Parallel CPU Vertex Shading",
+        "Shade vertices on more than one CPU thread in draws the emulator runs on the CPU: "
+        "ubershader draws whose vertex pipeline isn't built yet, and every draw with hardware "
+        "shaders off. Shortens some first-play stutters (Luigi's Mansion 2: up to 28 ms per "
+        "frame with 3 threads) and uses more CPU. Takes effect when a game starts.",
+        nullptr,
+        config::category::graphics,
+        {
+            { config::disabled, "Disabled" },
+            { "2", "2 Threads" },
+            { "3", "3 Threads" },
+            { nullptr, nullptr }
+        },
+        config::disabled
     },
     {
         config::graphics::resolution_factor,
@@ -1258,6 +1277,14 @@ static void ParseGraphicsOptions(void) {
                                                    config::enabled) == config::enabled;
         SetPocSwitch("AZAHAR_CHAIN_BUILD", early ? "short" : nullptr);
         SetPocSwitch("AZAHAR_SHORT_FIRST", early ? "own" : nullptr);
+
+        // Read when PicaCore is constructed (PicaCore::InitVertexThreads() in
+        // src/video_core/pica/pica_core_vertex_threads.cpp); unset = off.
+        const auto vertex_threads =
+            LibRetro::FetchVariable(config::graphics::vertex_threads, config::disabled);
+        SetPocSwitch("AZAHAR_VERTEX_THREADS", vertex_threads == "2"   ? "2"
+                                              : vertex_threads == "3" ? "3"
+                                                                      : nullptr);
 
         // Read when System::Init() builds the MemorySystem (src/core/memory.cpp); unset = off.
         const bool fastmem =
