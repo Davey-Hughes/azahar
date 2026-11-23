@@ -6,9 +6,11 @@
 #include <fmt/ranges.h>
 #include <optional>
 #include <string_view>
+#ifdef __linux__
 #include <time.h>
 #include <unistd.h>
 #include <sys/resource.h>
+#endif
 
 #include "common/alignment.h"
 #include "common/literals.h"
@@ -227,12 +229,18 @@ void RasterizerVulkan::TickFrame() {
 }
 
 void RasterizerVulkan::LogSlowFrame(std::chrono::steady_clock::time_point now) {
+    // Thread CPU time, run-queue wait, context switches and the thread id need Linux APIs; other
+    // platforms log them as 0.
+    u64 cpu_ns = 0;
+    u64 sched_runq_ns = 0;
+    u64 vcsw = 0;
+    u64 ivcsw = 0;
+    long tid = 0;
+#ifdef __linux__
     timespec ts{};
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
-    const u64 cpu_ns = static_cast<u64>(ts.tv_sec) * 1'000'000'000 + static_cast<u64>(ts.tv_nsec);
-    const u64 pipeline_wait_ns = pipeline_cache.GetWaitStats().ns;
+    cpu_ns = static_cast<u64>(ts.tv_sec) * 1'000'000'000 + static_cast<u64>(ts.tv_nsec);
     // Run-queue wait: time the thread was runnable but not running (preempted).
-    u64 sched_runq_ns = 0;
     if (std::FILE* f = std::fopen("/proc/thread-self/schedstat", "r")) {
         unsigned long long run = 0, wait = 0;
         if (std::fscanf(f, "%llu %llu", &run, &wait) == 2) {
@@ -242,8 +250,11 @@ void RasterizerVulkan::LogSlowFrame(std::chrono::steady_clock::time_point now) {
     }
     rusage usage{};
     getrusage(RUSAGE_THREAD, &usage);
-    const u64 vcsw = static_cast<u64>(usage.ru_nvcsw);
-    const u64 ivcsw = static_cast<u64>(usage.ru_nivcsw);
+    vcsw = static_cast<u64>(usage.ru_nvcsw);
+    ivcsw = static_cast<u64>(usage.ru_nivcsw);
+    tid = static_cast<long>(gettid());
+#endif
+    const u64 pipeline_wait_ns = pipeline_cache.GetWaitStats().ns;
     if (last_frame_time.time_since_epoch().count() != 0) {
         const auto ns_since_epoch = [](std::chrono::steady_clock::time_point t) {
             return std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch())
@@ -257,7 +268,7 @@ void RasterizerVulkan::LogSlowFrame(std::chrono::steady_clock::time_point now) {
                      "draw={:.1f}ms draws={} uber_draws={} wait_worker={:.1f}ms "
                      "pipeline_wait={:.1f}ms runq={:.1f}ms vcsw={} ivcsw={} "
                      "uwait_small={} uwait_big={}",
-                     uber_stats.frames, static_cast<long>(gettid()), start_ns, end_ns,
+                     uber_stats.frames, tid, start_ns, end_ns,
                      (end_ns - start_ns) / 1e6, (cpu_ns - last_frame_cpu_ns) / 1e6,
                      frame_stats.draw_ns / 1e6, frame_stats.draws, frame_stats.uber_draws,
                      frame_stats.wait_worker_ns / 1e6,
