@@ -53,11 +53,11 @@ inline std::mutex mutex;
 inline std::map<std::string, Entry> entries;
 inline std::chrono::steady_clock::time_point window_start = std::chrono::steady_clock::now();
 /// What the current FlushRegion() is for; empty means a caller other than ValidateSurface().
-inline thread_local std::string reason;
+extern thread_local std::string reason;
 /// Which Accelerate* step is running and with what config; empty outside of them.
-inline thread_local std::string caller;
+extern thread_local std::string caller;
 /// Full description of the surface being validated, for the first-seen detail log.
-inline thread_local std::string validate_detail;
+extern thread_local std::string validate_detail;
 inline std::set<std::string> seen_details;
 
 /// Logs the full context of a download the first time that exact context is seen.
